@@ -15,6 +15,10 @@ type (
 
 var _ logger.Logger = (*ZapLogger)(nil)
 
+func NewLog(zl *zap.Logger) logger.Logger {
+	return &ZapLogger{logger: zl}
+}
+
 func (zl *ZapLogger) Log(level logger.Level, kvs ...interface{}) {
 	if len(kvs) == 0 || len(kvs)%2 != 0 {
 		zl.logger.Warn(fmt.Sprint("kvs mus appear in paris: ", kvs))
