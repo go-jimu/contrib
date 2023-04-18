@@ -1,10 +1,10 @@
 module github.com/go-jimu/contrib/logger/zap
 
-go 1.18
+go 1.19
 
 require (
-	github.com/go-jimu/components v0.1.1
-	go.uber.org/zap v1.23.0
+	github.com/go-jimu/components v0.2.9
+	go.uber.org/zap v1.24.0
 )
 
 require (

@@ -20,8 +20,8 @@ func NewLog(zl *zap.Logger) logger.Logger {
 }
 
 func (zl *ZapLogger) Log(level logger.Level, kvs ...interface{}) {
-	if len(kvs) == 0 || len(kvs)%2 != 0 {
-		zl.logger.Warn(fmt.Sprint("kvs mus appear in paris: ", kvs))
+	if len(kvs) == 0 || len(kvs)&1 != 0 {
+		zl.logger.Warn("", zap.Error(fmt.Errorf("kvs must appear in paris: %v", kvs)))
 		return
 	}
 
