@@ -1,6 +1,7 @@
 package apollo
 
 import (
+	"log/slog"
 	"strings"
 
 	"github.com/apolloconfig/agollo/v4"
@@ -10,7 +11,6 @@ import (
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/encoding"
 	"github.com/go-jimu/components/sloghelper"
-	"golang.org/x/exp/slog"
 )
 
 type apollo struct {

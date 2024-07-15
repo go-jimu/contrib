@@ -2,14 +2,13 @@ package apollo
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
-	"github.com/apolloconfig/agollo/v4/component/log"
 	"github.com/apolloconfig/agollo/v4/storage"
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/encoding"
 	"github.com/go-jimu/components/sloghelper"
-	"golang.org/x/exp/slog"
 )
 
 type watcher struct {
@@ -28,18 +27,15 @@ func (c *customChangeListener) onChange(namespace string, changes map[string]*st
 	kv := make([]*config.KeyValue, 0, 2)
 	if strings.Contains(namespace, ".") && !strings.HasSuffix(namespace, "."+properties) &&
 		(format(namespace) == yaml || format(namespace) == yml || format(namespace) == json) {
-		value, err := c.apollo.client.GetConfigCache(namespace).Get("content")
-		if err != nil {
-			slog.Warn("apollo get config failed", sloghelper.Error(err))
-			return nil
-		}
-		kv = append(kv, &config.KeyValue{
-			Key:    namespace,
-			Value:  []byte(value.(string)),
-			Format: format(namespace),
-		})
+		if value, ok := changes["content"]; ok {
+			kv = append(kv, &config.KeyValue{
+				Key:    namespace,
+				Value:  []byte(value.NewValue.(string)),
+				Format: format(namespace),
+			})
 
-		return kv
+			return kv
+		}
 	}
 
 	next := make(map[string]interface{})
@@ -52,7 +48,7 @@ func (c *customChangeListener) onChange(namespace string, changes map[string]*st
 	codec := encoding.GetCodec(f)
 	val, err := codec.Marshal(next)
 	if err != nil {
-		log.Warnf("apollo could not handle namespace %s: %v", namespace, err)
+		slog.Warn("apollo could not handle namespace", slog.String("namespace", namespace), sloghelper.Error(err))
 		return nil
 	}
 	kv = append(kv, &config.KeyValue{
