@@ -3,7 +3,11 @@ on:
   push:
     tags:
     - 'v[0-9]+.[0-9]+.[0-9]+'
+    branches:
+    - master
   pull_request:
+    branches:
+    - master
 
 jobs:
   code-coverage:
@@ -57,8 +61,7 @@ jobs:
     steps:
     - name: Check out code into the Go module directory
       uses: actions/checkout@v4
-    - name: tag
-      env:
+    - env:
         PACKAGE_TAG:  ${{ matrix.package }}/${{ github.ref_name }}
       run: |
         git config --global user.name "Github Action"
