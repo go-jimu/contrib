@@ -66,14 +66,20 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 	for {
 		fetches := c.client.PollFetches(ctx)
-		if err := fetches.Err(); err != nil {
+		for _, fetchErr := range fetches.Errors() {
+			err := fetchErr.Err
 			if handlerErr := c.cfg.errorHandler(ctx, Error{
 				Stage: StagePoll,
 				Err:   err,
 			}); handlerErr != nil {
 				return handlerErr
 			}
-			continue
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 		}
 
 		for iter := fetches.RecordIter(); !iter.Done(); {

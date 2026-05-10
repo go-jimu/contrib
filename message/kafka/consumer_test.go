@@ -16,6 +16,7 @@ type fakeConsumerClient struct {
 	committed  []*kgo.Record
 	fetches    []kgo.Fetches
 	pollHooks  []func()
+	pollCount  int
 	produceErr error
 	commitErr  error
 	closed     bool
@@ -36,6 +37,7 @@ func (f *fakeConsumerClient) CommitRecords(_ context.Context, records ...*kgo.Re
 }
 
 func (f *fakeConsumerClient) PollFetches(_ context.Context) kgo.Fetches {
+	f.pollCount++
 	if len(f.pollHooks) > 0 {
 		hook := f.pollHooks[0]
 		f.pollHooks = f.pollHooks[1:]

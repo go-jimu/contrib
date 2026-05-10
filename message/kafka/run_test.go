@@ -33,6 +33,24 @@ func fetchError(err error) kgo.Fetches {
 	}}
 }
 
+func fetchErrorAndRecords(err error, records ...*kgo.Record) kgo.Fetches {
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: "orders",
+			Partitions: []kgo.FetchPartition{
+				{
+					Partition: 0,
+					Err:       err,
+				},
+				{
+					Partition: 1,
+					Records:   records,
+				},
+			},
+		}},
+	}}
+}
+
 // Intent: fetched records should flow through the normal handler and commit path before a later poll stop.
 func TestConsumerRunProcessesFetchedRecords(t *testing.T) {
 	cfg := testConsumerConfig()
@@ -78,6 +96,48 @@ func TestConsumerRunProcessesFetchedRecords(t *testing.T) {
 	}
 }
 
+// Intent: records in a partial fetch should still be handled when poll errors are observed and ignored.
+func TestConsumerRunProcessesRecordsFromMixedFetchWhenPollHandlerReturnsNil(t *testing.T) {
+	cfg := testConsumerConfig()
+	var handled []Error
+	WithErrorHandler(func(_ context.Context, failure Error) error {
+		handled = append(handled, failure)
+		if errors.Is(failure.Err, context.Canceled) {
+			return failure.Err
+		}
+		return nil
+	})(&cfg)
+	transientErr := errors.New("partition fetch failed")
+	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
+	client := &fakeConsumerClient{fetches: []kgo.Fetches{
+		fetchErrorAndRecords(transientErr, record),
+		fetchError(context.Canceled),
+	}}
+	consumer := newConsumer(client, cfg)
+	handler := &testHandler{kinds: []message.Kind{"order.payment.v1.OrderPaid"}}
+	if err := consumer.Subscribe(handler); err != nil {
+		t.Fatalf("Subscribe returned error: %v", err)
+	}
+
+	err := consumer.Run(context.Background())
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	}
+	if len(handler.seen) != 1 {
+		t.Fatalf("handler saw %d messages, want 1", len(handler.seen))
+	}
+	if len(client.committed) != 1 || client.committed[0] != record {
+		t.Fatalf("committed records = %#v, want source record", client.committed)
+	}
+	if len(handled) != 2 {
+		t.Fatalf("handled errors = %d, want 2", len(handled))
+	}
+	if !errors.Is(handled[0].Err, transientErr) {
+		t.Fatalf("first handled error = %v, want %v", handled[0].Err, transientErr)
+	}
+}
+
 // Intent: poll failures should be reported as StagePoll and stop when the error handler returns an error.
 func TestConsumerRunSurfacesPollError(t *testing.T) {
 	cfg := testConsumerConfig()
@@ -94,6 +154,40 @@ func TestConsumerRunSurfacesPollError(t *testing.T) {
 
 	if !errors.Is(err, pollErr) {
 		t.Fatalf("Run error = %v, want %v", err, pollErr)
+	}
+	if len(handled) != 1 {
+		t.Fatalf("handled errors = %d, want 1", len(handled))
+	}
+	if handled[0].Stage != StagePoll {
+		t.Fatalf("handled stage = %q, want %q", handled[0].Stage, StagePoll)
+	}
+}
+
+// Intent: context cancellation from polling should stop Run even when the error handler only observes it.
+func TestConsumerRunStopsOnCanceledPollWhenErrorHandlerReturnsNil(t *testing.T) {
+	cfg := testConsumerConfig()
+	var handled []Error
+	WithErrorHandler(func(_ context.Context, failure Error) error {
+		handled = append(handled, failure)
+		return nil
+	})(&cfg)
+	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
+	client := &fakeConsumerClient{fetches: []kgo.Fetches{
+		fetchError(context.Canceled),
+		fetchRecords(record),
+	}}
+	consumer := newConsumer(client, cfg)
+
+	err := consumer.Run(context.Background())
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	}
+	if client.pollCount != 1 {
+		t.Fatalf("poll count = %d, want 1", client.pollCount)
+	}
+	if len(client.committed) != 0 {
+		t.Fatalf("committed records = %d, want 0", len(client.committed))
 	}
 	if len(handled) != 1 {
 		t.Fatalf("handled errors = %d, want 1", len(handled))
