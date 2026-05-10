@@ -34,7 +34,7 @@ func failureAction(failure Error, cfg config) failureDecision {
 		return failureDecision{kind: actionRetry, topic: topic, attempt: next, err: err}
 	}
 
-	if !cfg.dlqPolicy.Enabled {
+	if !cfg.dlqEnabled {
 		return failureDecision{kind: actionNone, attempt: next}
 	}
 	topic, err := resolveFailureTopic(cfg.dlqTopicResolver, failure)
@@ -42,7 +42,7 @@ func failureAction(failure Error, cfg config) failureDecision {
 }
 
 func buildFailureRecord(failure Error, decision failureDecision, cfg config) *kgo.Record {
-	if decision.kind == actionNone || failure.Record == nil {
+	if decision.err != nil || decision.kind == actionNone || decision.topic == "" || failure.Record == nil {
 		return nil
 	}
 

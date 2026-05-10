@@ -101,8 +101,8 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatal("retry policy returned false for handle stage, want true")
 	}
 
-	if !cfg.dlqPolicy.Enabled {
-		t.Fatal("DLQ policy enabled = false, want true")
+	if !cfg.dlqEnabled {
+		t.Fatal("DLQ enabled = false, want true")
 	}
 	if cfg.headerNames != defaultHeaders {
 		t.Fatalf("header names = %#v, want %#v", cfg.headerNames, defaultHeaders)

@@ -19,9 +19,7 @@ type RetryPolicy struct {
 	Retryable   func(Error) bool
 }
 
-type DLQPolicy struct {
-	Enabled bool
-}
+type DLQPolicy struct{}
 
 type Option func(*config)
 
@@ -40,6 +38,7 @@ type config struct {
 	errorHandler        ErrorHandler
 	retryPolicy         RetryPolicy
 	dlqPolicy           DLQPolicy
+	dlqEnabled          bool
 	retryTopicResolver  FailureTopicResolver
 	dlqTopicResolver    FailureTopicResolver
 	closeClient         bool
@@ -56,6 +55,7 @@ func defaultConfig() config {
 		errorHandler:        defaultErrorHandler,
 		retryPolicy:         defaultRetryPolicy(),
 		dlqPolicy:           defaultDLQPolicy(),
+		dlqEnabled:          true,
 		retryTopicResolver:  defaultRetryTopicResolver,
 		dlqTopicResolver:    defaultDLQTopicResolver,
 		headerNames:         defaultHeaderNames(),
@@ -112,7 +112,7 @@ func defaultRetryPolicy() RetryPolicy {
 }
 
 func defaultDLQPolicy() DLQPolicy {
-	return DLQPolicy{Enabled: true}
+	return DLQPolicy{}
 }
 
 func defaultRetryTopicResolver(failure Error) (string, error) {
@@ -187,11 +187,13 @@ func WithRetryPolicy(policy RetryPolicy) Option {
 	}
 }
 
-func WithDLQPolicy(policy DLQPolicy) Option {
+func WithDLQPolicy(DLQPolicy) Option {
+	return func(*config) {}
+}
+
+func WithDLQDisabled() Option {
 	return func(cfg *config) {
-		if policy.Enabled {
-			cfg.dlqPolicy.Enabled = policy.Enabled
-		}
+		cfg.dlqEnabled = false
 	}
 }
 
