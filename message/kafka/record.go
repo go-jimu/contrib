@@ -11,6 +11,11 @@ import (
 )
 
 func messageToRecord(msg message.Message, cfg config) (*kgo.Record, error) {
+	payload := msg.Payload()
+	if isNilProtoMessage(payload) {
+		return nil, ErrNilPayload
+	}
+
 	if cfg.topicResolver == nil {
 		return nil, ErrNoTopic
 	}
@@ -20,11 +25,6 @@ func messageToRecord(msg message.Message, cfg config) (*kgo.Record, error) {
 	}
 	if topic == "" {
 		return nil, ErrNoTopic
-	}
-
-	payload := msg.Payload()
-	if payload == nil {
-		return nil, ErrNilPayload
 	}
 
 	value, err := cfg.codec.Marshal(payload)

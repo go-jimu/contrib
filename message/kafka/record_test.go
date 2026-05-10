@@ -87,9 +87,6 @@ func TestMessageToRecordReservedHeadersWin(t *testing.T) {
 // Intent: a message without protobuf payload should fail clearly instead of producing an undecodable Kafka record.
 func TestMessageToRecordRejectsNilPayload(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.topicResolver = func(message.Message) (string, error) {
-		return "order.payment.v1.OrderPaid", nil
-	}
 
 	record, err := messageToRecord(message.Message{}, cfg)
 
@@ -98,6 +95,98 @@ func TestMessageToRecordRejectsNilPayload(t *testing.T) {
 	}
 	if record != nil {
 		t.Fatalf("record = %#v, want nil", record)
+	}
+}
+
+// Intent: custom envelope header names should define the reserved set for both record mapping directions.
+func TestRecordMappingUsesCustomHeaderNames(t *testing.T) {
+	cfg := defaultConfig()
+	defaultHeaders := cfg.headerNames
+	customHeaders := HeaderNames{
+		MessageID:   "x-message-id",
+		MessageKind: "x-message-kind",
+		OccurredAt:  "x-occurred-at",
+	}
+	WithHeaderNames(customHeaders)(&cfg)
+	cfg.payloadResolver = func(kind message.Kind) (proto.Message, error) {
+		if kind != "order.payment.v1.OrderPaid" {
+			t.Fatalf("payload resolver kind = %q, want order.payment.v1.OrderPaid", kind)
+		}
+		return &testdata.TestModel{}, nil
+	}
+	occurredAt := time.Date(2026, 5, 10, 13, 0, 0, 0, time.UTC)
+	msg, err := message.New(
+		"order.payment.v1.OrderPaid",
+		testPayload(t),
+		message.WithID("msg-custom"),
+		message.WithKey("order-custom"),
+		message.WithOccurredAt(occurredAt),
+		message.WithHeader(customHeaders.MessageID, "forged-id"),
+		message.WithHeader(customHeaders.MessageKind, "forged.Kind"),
+		message.WithHeader(customHeaders.OccurredAt, "2020-01-01T00:00:00Z"),
+		message.WithHeader(defaultHeaders.MessageID, "legacy-id"),
+		message.WithHeader(defaultHeaders.MessageKind, "legacy-kind"),
+		message.WithHeader(defaultHeaders.OccurredAt, "legacy-time"),
+	)
+	if err != nil {
+		t.Fatalf("message.New returned error: %v", err)
+	}
+
+	record, err := messageToRecord(msg, cfg)
+
+	if err != nil {
+		t.Fatalf("messageToRecord returned error: %v", err)
+	}
+	if got := headerValue(record.Headers, customHeaders.MessageID); got != "msg-custom" {
+		t.Fatalf("custom message id header = %q, want msg-custom", got)
+	}
+	if got := headerValue(record.Headers, customHeaders.MessageKind); got != "order.payment.v1.OrderPaid" {
+		t.Fatalf("custom message kind header = %q, want order.payment.v1.OrderPaid", got)
+	}
+	if got := headerValue(record.Headers, customHeaders.OccurredAt); got != occurredAt.Format(time.RFC3339Nano) {
+		t.Fatalf("custom occurred at header = %q, want %q", got, occurredAt.Format(time.RFC3339Nano))
+	}
+	if got := headerValue(record.Headers, defaultHeaders.MessageID); got != "legacy-id" {
+		t.Fatalf("default message id header = %q, want legacy-id", got)
+	}
+	if got := headerValue(record.Headers, defaultHeaders.MessageKind); got != "legacy-kind" {
+		t.Fatalf("default message kind header = %q, want legacy-kind", got)
+	}
+	if got := headerValue(record.Headers, defaultHeaders.OccurredAt); got != "legacy-time" {
+		t.Fatalf("default occurred at header = %q, want legacy-time", got)
+	}
+
+	decoded, err := recordToMessage(record, cfg)
+
+	if err != nil {
+		t.Fatalf("recordToMessage returned error: %v", err)
+	}
+	if decoded.ID() != "msg-custom" {
+		t.Fatalf("decoded id = %q, want msg-custom", decoded.ID())
+	}
+	if decoded.Kind() != "order.payment.v1.OrderPaid" {
+		t.Fatalf("decoded kind = %q, want order.payment.v1.OrderPaid", decoded.Kind())
+	}
+	if decoded.Key() != "order-custom" {
+		t.Fatalf("decoded key = %q, want order-custom", decoded.Key())
+	}
+	if !decoded.OccurredAt().Equal(occurredAt) {
+		t.Fatalf("decoded occurred at = %v, want %v", decoded.OccurredAt(), occurredAt)
+	}
+	if got := decoded.Headers()[customHeaders.MessageID]; got != "" {
+		t.Fatalf("decoded custom reserved message id header = %q, want empty", got)
+	}
+	if got := decoded.Headers()[defaultHeaders.MessageID]; got != "legacy-id" {
+		t.Fatalf("decoded default message id header = %q, want legacy-id", got)
+	}
+	if got := decoded.Headers()[defaultHeaders.MessageKind]; got != "legacy-kind" {
+		t.Fatalf("decoded default message kind header = %q, want legacy-kind", got)
+	}
+	if got := decoded.Headers()[defaultHeaders.OccurredAt]; got != "legacy-time" {
+		t.Fatalf("decoded default occurred at header = %q, want legacy-time", got)
+	}
+	if !proto.Equal(decoded.Payload(), testPayload(t)) {
+		t.Fatalf("decoded payload = %#v, want %#v", decoded.Payload(), testPayload(t))
 	}
 }
 
