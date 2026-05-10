@@ -8,6 +8,10 @@ on:
   pull_request:
     branches:
     - master
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: write
 
 jobs:
   code-coverage:
@@ -30,6 +34,7 @@ jobs:
           verbose: true
   unittest:
     runs-on: ${{matrix.os}}
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'closed' || github.event.pull_request.merged == true }}
     steps:
       - name: Set up Go 1.x
         uses: actions/setup-go@v5
@@ -66,6 +71,76 @@ jobs:
     - env:
         PACKAGE: ${{ matrix.package }}
         ROOT_TAG: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+
+        git config --global user.name "Github Action"
+        git config --global user.email "go-jimu@users.noreply.github.com"
+
+        package_tag="${PACKAGE}/${ROOT_TAG}"
+        if git rev-parse -q --verify "refs/tags/${package_tag}" >/dev/null; then
+          echo "Package tag ${package_tag} already exists; skipping."
+          exit 0
+        fi
+
+        previous_tag="$(git tag --list "${PACKAGE}/v*" --sort=-v:refname | head -n 1 || true)"
+        if [ -n "${previous_tag}" ] && git diff --quiet "${previous_tag}" HEAD -- "${PACKAGE}"; then
+          echo "No changes in ${PACKAGE} since ${previous_tag}; skipping ${package_tag}."
+          exit 0
+        fi
+
+        if [ -z "${previous_tag}" ]; then
+          echo "No previous package tag found for ${PACKAGE}; creating ${package_tag}."
+        else
+          echo "Changes detected in ${PACKAGE} since ${previous_tag}; creating ${package_tag}."
+        fi
+
+        git tag "${package_tag}"
+        git push origin "${package_tag}"
+  auto_release:
+    needs: unittest
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true }}
+    outputs:
+      new_tag: ${{ steps.autotag.outputs.new_tag }}
+    steps:
+    - name: Check out master
+      uses: actions/checkout@v4
+      with:
+        ref: master
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Auto Tag
+      id: autotag
+      uses: jacexh/action-autotag@v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        default_bump: patch
+    - name: Create GitHub Release
+      if: ${{ steps.autotag.outputs.new_tag != '' }}
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.autotag.outputs.new_tag }}
+        name: ${{ steps.autotag.outputs.new_tag }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  auto_release_sub_packages:
+    needs: auto_release
+    runs-on: ubuntu-latest
+    if: ${{ needs.auto_release.outputs.new_tag != '' }}
+    strategy:
+      matrix:
+        package: [config/etcd, config/nacos, config/kubernetes, config/apollo, logger/zap, message/kafka]
+    steps:
+    - name: Check out master
+      uses: actions/checkout@v4
+      with:
+        ref: master
+        fetch-depth: 0
+    - env:
+        PACKAGE: ${{ matrix.package }}
+        ROOT_TAG: ${{ needs.auto_release.outputs.new_tag }}
       run: |
         set -euo pipefail
 
