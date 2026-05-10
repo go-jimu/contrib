@@ -1,0 +1,64 @@
+name: Release Packages
+
+on:
+  workflow_call:
+    inputs:
+      root_tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      root_tag:
+        description: Root tag to publish package tags for, for example v0.9.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release_packages:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [config/etcd, config/nacos, config/kubernetes, config/apollo, logger/zap, message/kafka]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          PACKAGE: ${{ matrix.package }}
+          ROOT_TAG: ${{ inputs.root_tag }}
+        run: |
+          set -euo pipefail
+
+          git config --global user.name "Github Action"
+          git config --global user.email "go-jimu@users.noreply.github.com"
+
+          if ! git rev-parse -q --verify "refs/tags/${ROOT_TAG}" >/dev/null; then
+            echo "Root tag ${ROOT_TAG} does not exist."
+            exit 1
+          fi
+
+          root_target="$(git rev-list -n 1 "${ROOT_TAG}")"
+          package_tag="${PACKAGE}/${ROOT_TAG}"
+          if git rev-parse -q --verify "refs/tags/${package_tag}" >/dev/null; then
+            echo "Package tag ${package_tag} already exists; skipping."
+            exit 0
+          fi
+
+          previous_tag="$(git tag --list "${PACKAGE}/v*" --sort=-v:refname | head -n 1 || true)"
+          if [ -n "${previous_tag}" ] && git diff --quiet "${previous_tag}" "${root_target}" -- "${PACKAGE}"; then
+            echo "No changes in ${PACKAGE} since ${previous_tag}; skipping ${package_tag}."
+            exit 0
+          fi
+
+          if [ -z "${previous_tag}" ]; then
+            echo "No previous package tag found for ${PACKAGE}; creating ${package_tag}."
+          else
+            echo "Changes detected in ${PACKAGE} since ${previous_tag}; creating ${package_tag}."
+          fi
+
+          git tag "${package_tag}" "${root_target}"
+          git push origin "${package_tag}"
