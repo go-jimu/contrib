@@ -20,7 +20,7 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 
 | Dependency | Version / Source | Purpose | Why Chosen |
 | --- | --- | --- | --- |
-| `github.com/go-jimu/components` | v0.5.6 in config modules, v0.4.0 in `logger/zap`, v0.8.0 in `message/kafka` | Shared component interfaces | Defines the contracts this repo implements. |
+| `github.com/go-jimu/components` | v0.8.0 in config modules and `message/kafka`; v0.4.0 in `logger/zap` | Shared component interfaces | Defines the contracts this repo implements. |
 | `github.com/apolloconfig/agollo/v4` | v4.4.0 | Apollo SDK | Native Apollo client for Go. |
 | `go.etcd.io/etcd/client/v3` | v3.5.14 | etcd SDK | Official etcd v3 client. |
 | `k8s.io/client-go` | v0.30.2 | Kubernetes client | Standard Go client for ConfigMaps. |

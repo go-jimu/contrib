@@ -1,7 +1,7 @@
 ---
 last_updated: 2026-05-10
 updated_by: superpowers-memory:update
-covers_branch: release/message@379c4dd
+covers_branch: release/message@c5e30f0
 triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 ---
 
@@ -20,7 +20,7 @@ Key points: config providers cover Apollo, etcd, Kubernetes, and Nacos; logging 
 ## tech-stack.md
 
 Language, workspace, CI, and key SDK dependencies.
-Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; Kafka uses `components` v0.8.0, franz-go v1.21.1, and Testcontainers Kafka v0.42.0.
+Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; config modules and Kafka use `components` v0.8.0.
 
 ## conventions.md
 
