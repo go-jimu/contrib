@@ -30,6 +30,7 @@ This provider is both an implementation of Kafka publish/consume behavior and a 
 
 - `github.com/go-jimu/components v0.8.0`
 - `github.com/twmb/franz-go v1.21.1`
+- Test-only integration dependency: `github.com/testcontainers/testcontainers-go/modules/kafka v0.42.0`
 
 `franz-go` is selected because it is pure Go, feature-complete, and exposes producer, consumer group, manual commit, and advanced Kafka options without requiring librdkafka.
 
@@ -252,7 +253,7 @@ If such a mismatch appears, first propose changes to `github.com/go-jimu/compone
 
 ## Tests
 
-All unit tests should be real tests of this provider's implementation, without a live Kafka broker by default.
+Unit tests should be real tests of this provider's implementation, without a live Kafka broker by default.
 
 Planned coverage:
 
@@ -270,7 +271,12 @@ Planned coverage:
 - commit error is surfaced through `ErrorHandler`.
 - reserved headers are copied and protected from accidental user-header overwrite.
 
-If fake client boundaries become too broad or stop testing real provider behavior, add a build-tagged Kafka integration test.
+Build-tagged integration tests should use `testcontainers-go/modules/kafka` to exercise the provider against a real Kafka broker when Docker is available:
+
+- publish a `message.Message` through `NewPublisher`, consume it through `Consumer.Run`, and verify handler-visible `Message` fields.
+- route a handler failure through retry or DLQ and verify the destination topic receives the failure record.
+
+These tests should run with `go test -tags=integration ./...`; they should not be required by default `make test`.
 
 ## Non-Goals
 
