@@ -90,8 +90,8 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatalf("payload resolver payload = %#v, want nil", payload)
 	}
 
-	if err := cfg.errorHandler(context.Background(), Error{Err: ErrUnhandledMessage}); err != nil {
-		t.Fatalf("error handler returned error: %v", err)
+	if err := cfg.errorHandler(context.Background(), Error{Err: ErrUnhandledMessage}); !errors.Is(err, ErrUnhandledMessage) {
+		t.Fatalf("error handler error = %v, want %v", err, ErrUnhandledMessage)
 	}
 
 	if cfg.retryPolicy.MaxAttempts != 3 {

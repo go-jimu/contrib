@@ -347,7 +347,6 @@ func TestFailureActionReportsResolverError(t *testing.T) {
 func TestRetryPolicyOptionsPreserveDefaultsForZeroValues(t *testing.T) {
 	cfg := defaultConfig()
 	WithRetryPolicy(RetryPolicy{})(&cfg)
-	WithDLQPolicy(DLQPolicy{})(&cfg)
 
 	decision := failureAction(Error{
 		Stage:  StageHandle,
@@ -371,7 +370,7 @@ func TestRetryPolicyOptionsPreserveDefaultsForZeroValues(t *testing.T) {
 		Err:    errors.New("decode failed"),
 	}, cfg)
 	if dlqDecision.kind != actionDLQ {
-		t.Fatalf("zero-value DLQ policy decision kind = %v, want %v", dlqDecision.kind, actionDLQ)
+		t.Fatalf("default DLQ decision kind = %v, want %v", dlqDecision.kind, actionDLQ)
 	}
 }
 

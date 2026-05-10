@@ -19,8 +19,6 @@ type RetryPolicy struct {
 	Retryable   func(Error) bool
 }
 
-type DLQPolicy struct{}
-
 type Option func(*config)
 
 type HeaderNames struct {
@@ -37,7 +35,6 @@ type config struct {
 	payloadResolver     PayloadResolver
 	errorHandler        ErrorHandler
 	retryPolicy         RetryPolicy
-	dlqPolicy           DLQPolicy
 	dlqEnabled          bool
 	retryTopicResolver  FailureTopicResolver
 	dlqTopicResolver    FailureTopicResolver
@@ -54,7 +51,6 @@ func defaultConfig() config {
 		payloadResolver:     defaultPayloadResolver,
 		errorHandler:        defaultErrorHandler,
 		retryPolicy:         defaultRetryPolicy(),
-		dlqPolicy:           defaultDLQPolicy(),
 		dlqEnabled:          true,
 		retryTopicResolver:  defaultRetryTopicResolver,
 		dlqTopicResolver:    defaultDLQTopicResolver,
@@ -98,8 +94,8 @@ func defaultPayloadResolver(message.Kind) (proto.Message, error) {
 	return nil, ErrNoPayloadResolver
 }
 
-func defaultErrorHandler(context.Context, Error) error {
-	return nil
+func defaultErrorHandler(_ context.Context, failure Error) error {
+	return failure.Err
 }
 
 func defaultRetryPolicy() RetryPolicy {
@@ -109,10 +105,6 @@ func defaultRetryPolicy() RetryPolicy {
 			return failure.Stage == StageHandle || failure.Stage == StageUnhandled
 		},
 	}
-}
-
-func defaultDLQPolicy() DLQPolicy {
-	return DLQPolicy{}
 }
 
 func defaultRetryTopicResolver(failure Error) (string, error) {
@@ -185,10 +177,6 @@ func WithRetryPolicy(policy RetryPolicy) Option {
 			cfg.retryPolicy.Retryable = policy.Retryable
 		}
 	}
-}
-
-func WithDLQPolicy(DLQPolicy) Option {
-	return func(*config) {}
 }
 
 func WithDLQDisabled() Option {
