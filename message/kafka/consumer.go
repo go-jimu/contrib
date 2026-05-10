@@ -140,11 +140,15 @@ func (c *Consumer) handleFailure(ctx context.Context, failure Error) error {
 func (c *Consumer) commit(ctx context.Context, record *kgo.Record) error {
 	if err := c.client.CommitRecords(ctx, record); err != nil {
 		wrappedErr := fmt.Errorf("%w: %w", ErrCommitFailed, err)
-		return c.cfg.errorHandler(ctx, Error{
+		handlerErr := c.cfg.errorHandler(ctx, Error{
 			Stage:  StageCommit,
 			Record: record,
 			Err:    wrappedErr,
 		})
+		if handlerErr != nil {
+			return handlerErr
+		}
+		return wrappedErr
 	}
 	return nil
 }
