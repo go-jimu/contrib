@@ -120,6 +120,14 @@ func run(ctx context.Context) error {
 
 `WithPayloadResolver` must return an empty protobuf message for the incoming
 message kind so the adapter can unmarshal the Kafka record value.
+The `encoding/testdata` type in the example is only a placeholder; real
+projects should replace it with their own generated protobuf message type.
+
+Consumers must configure `kgo.DisableAutoCommit()`. The provider commits
+offsets manually after the handler succeeds, retry publishing succeeds, DLQ
+publishing succeeds, or a DLQ-disabled failure is explicitly dropped by a custom
+error handler. If franz-go auto commit is enabled, it can commit offsets outside
+the provider's commit semantics.
 
 ## Retry And DLQ
 
@@ -141,6 +149,13 @@ Retry behavior can be customized with `kafka.WithRetryPolicy`,
 `kafka.WithRetryTopicResolver`, `kafka.WithDLQTopicResolver`, and
 `kafka.WithDLQDisabled`.
 
+With `kafka.WithDLQDisabled`, the provider does not produce a DLQ record.
+Non-retryable or exhausted failures are passed to the configured `ErrorHandler`.
+The source offset is committed only when a custom `ErrorHandler` returns `nil`,
+which means the caller intentionally chose to drop the record and continue. The
+default `ErrorHandler` returns the original error, so the default DLQ-disabled
+behavior does not drop-and-commit; the source remains uncommitted.
+
 ## Contract Stability
 
 `github.com/go-jimu/components/ddd/message` is experimental. If real Kafka
@@ -152,5 +167,5 @@ contract first instead of adding adapter-specific workarounds here.
 Integration tests use Testcontainers and require Docker:
 
 ```sh
-go test -tags=integration ./...
+cd message/kafka && go test -tags=integration ./...
 ```
