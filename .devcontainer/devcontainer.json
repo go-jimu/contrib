@@ -4,7 +4,7 @@
 	"name": "Go",
 	"image": "mcr.microsoft.com/devcontainers/go:1-1.22-bookworm",
 	"features": {
-		"ghcr.io/devcontainers-contrib/features/bash-command:1": {
+		"ghcr.io/devcontainers-extra/features/bash-command:1": {
 			"command": "sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources"
 		}
 	},
