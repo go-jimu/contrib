@@ -12,13 +12,18 @@ type TopicResolver func(message.Message) (string, error)
 type KindResolver func(*kgo.Record) (message.Kind, error)
 type PayloadResolver func(message.Kind) (proto.Message, error)
 type ErrorHandler func(context.Context, Error) error
-type RetryPolicy func(Error) (bool, error)
-type DLQPolicy func(Error) (bool, error)
-type Option func(*config)
+type FailureTopicResolver func(Error) (string, error)
 
-type Error struct {
-	Err error
+type RetryPolicy struct {
+	MaxAttempts int
+	Retryable   func(Error) bool
 }
+
+type DLQPolicy struct {
+	Enabled bool
+}
+
+type Option func(*config)
 
 type HeaderNames struct {
 	MessageID   string
@@ -35,6 +40,8 @@ type config struct {
 	errorHandler        ErrorHandler
 	retryPolicy         RetryPolicy
 	dlqPolicy           DLQPolicy
+	retryTopicResolver  FailureTopicResolver
+	dlqTopicResolver    FailureTopicResolver
 	closeClient         bool
 	headerNames         HeaderNames
 }
@@ -47,8 +54,10 @@ func defaultConfig() config {
 		defaultKindResolver: true,
 		payloadResolver:     defaultPayloadResolver,
 		errorHandler:        defaultErrorHandler,
-		retryPolicy:         defaultRetryPolicy,
-		dlqPolicy:           defaultDLQPolicy,
+		retryPolicy:         defaultRetryPolicy(),
+		dlqPolicy:           defaultDLQPolicy(),
+		retryTopicResolver:  defaultRetryTopicResolver,
+		dlqTopicResolver:    defaultDLQTopicResolver,
 		headerNames:         defaultHeaderNames(),
 	}
 }
@@ -93,12 +102,37 @@ func defaultErrorHandler(context.Context, Error) error {
 	return nil
 }
 
-func defaultRetryPolicy(Error) (bool, error) {
-	return true, nil
+func defaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxAttempts: 3,
+		Retryable: func(failure Error) bool {
+			return failure.Stage == StageHandle || failure.Stage == StageUnhandled
+		},
+	}
 }
 
-func defaultDLQPolicy(Error) (bool, error) {
-	return true, nil
+func defaultDLQPolicy() DLQPolicy {
+	return DLQPolicy{Enabled: true}
+}
+
+func defaultRetryTopicResolver(failure Error) (string, error) {
+	if failure.Record == nil {
+		return "", ErrNilRecord
+	}
+	if failure.Record.Topic == "" {
+		return "", ErrNoTopic
+	}
+	return failure.Record.Topic + ".retry", nil
+}
+
+func defaultDLQTopicResolver(failure Error) (string, error) {
+	if failure.Record == nil {
+		return "", ErrNilRecord
+	}
+	if failure.Record.Topic == "" {
+		return "", ErrNoTopic
+	}
+	return failure.Record.Topic + ".dlq", nil
 }
 
 func WithCodec(codec Codec) Option {
@@ -144,16 +178,35 @@ func WithErrorHandler(handler ErrorHandler) Option {
 
 func WithRetryPolicy(policy RetryPolicy) Option {
 	return func(cfg *config) {
-		if policy != nil {
-			cfg.retryPolicy = policy
+		if policy.MaxAttempts > 0 {
+			cfg.retryPolicy.MaxAttempts = policy.MaxAttempts
+		}
+		if policy.Retryable != nil {
+			cfg.retryPolicy.Retryable = policy.Retryable
 		}
 	}
 }
 
 func WithDLQPolicy(policy DLQPolicy) Option {
 	return func(cfg *config) {
-		if policy != nil {
-			cfg.dlqPolicy = policy
+		if policy.Enabled {
+			cfg.dlqPolicy.Enabled = policy.Enabled
+		}
+	}
+}
+
+func WithRetryTopicResolver(resolver FailureTopicResolver) Option {
+	return func(cfg *config) {
+		if resolver != nil {
+			cfg.retryTopicResolver = resolver
+		}
+	}
+}
+
+func WithDLQTopicResolver(resolver FailureTopicResolver) Option {
+	return func(cfg *config) {
+		if resolver != nil {
+			cfg.dlqTopicResolver = resolver
 		}
 	}
 }

@@ -50,8 +50,8 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		WithKindResolver(nil),
 		WithPayloadResolver(nil),
 		WithErrorHandler(nil),
-		WithRetryPolicy(nil),
-		WithDLQPolicy(nil),
+		WithRetryTopicResolver(nil),
+		WithDLQTopicResolver(nil),
 	} {
 		opt(&cfg)
 	}
@@ -94,20 +94,15 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatalf("error handler returned error: %v", err)
 	}
 
-	retry, err := cfg.retryPolicy(Error{Err: ErrUnhandledMessage})
-	if err != nil {
-		t.Fatalf("retry policy returned error: %v", err)
+	if cfg.retryPolicy.MaxAttempts != 3 {
+		t.Fatalf("retry max attempts = %d, want 3", cfg.retryPolicy.MaxAttempts)
 	}
-	if !retry {
-		t.Fatal("retry policy = false, want true")
+	if !cfg.retryPolicy.Retryable(Error{Stage: StageHandle, Err: ErrUnhandledMessage}) {
+		t.Fatal("retry policy returned false for handle stage, want true")
 	}
 
-	dlq, err := cfg.dlqPolicy(Error{Err: ErrUnhandledMessage})
-	if err != nil {
-		t.Fatalf("DLQ policy returned error: %v", err)
-	}
-	if !dlq {
-		t.Fatal("DLQ policy = false, want true")
+	if !cfg.dlqPolicy.Enabled {
+		t.Fatal("DLQ policy enabled = false, want true")
 	}
 	if cfg.headerNames != defaultHeaders {
 		t.Fatalf("header names = %#v, want %#v", cfg.headerNames, defaultHeaders)

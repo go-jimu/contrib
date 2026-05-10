@@ -1,6 +1,30 @@
 package kafka
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/go-jimu/components/ddd/message"
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+type Stage string
+
+const (
+	StagePoll         Stage = "poll"
+	StageDecode       Stage = "decode"
+	StageUnhandled    Stage = "unhandled"
+	StageHandle       Stage = "handle"
+	StageRetryPublish Stage = "retry_publish"
+	StageDLQPublish   Stage = "dlq_publish"
+	StageCommit       Stage = "commit"
+)
+
+type Error struct {
+	Stage   Stage
+	Record  *kgo.Record
+	Message message.Message
+	Err     error
+}
 
 var (
 	ErrNilClient          = errors.New("kafka client is nil")
