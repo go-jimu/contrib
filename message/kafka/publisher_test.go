@@ -83,22 +83,23 @@ func TestNewPublisherRejectsNilClient(t *testing.T) {
 	}
 }
 
-// Intent: exported construction must apply topic resolver options to the record mapping config.
+// Intent: publishing must use the configured topic resolver before handing the record to the producer.
 func TestPublisherPublishAppliesTopicResolverOption(t *testing.T) {
-	msgPublisher := NewPublisher(nil, WithTopicResolver(func(message.Message) (string, error) {
+	client := &fakeProducerClient{}
+	cfg := defaultConfig()
+	WithTopicResolver(func(message.Message) (string, error) {
 		return "payments", nil
-	}))
+	})(&cfg)
+	publisher := newPublisher(client, cfg)
 
-	kafkaPublisher, ok := msgPublisher.(*publisher)
-	if !ok {
-		t.Fatalf("publisher type = %T, want *publisher", msgPublisher)
-	}
-
-	record, err := messageToRecord(newTestMessage(t, "order.payment.v1.OrderPaid"), kafkaPublisher.cfg)
+	err := publisher.Publish(context.Background(), newTestMessage(t, "order.payment.v1.OrderPaid"))
 	if err != nil {
-		t.Fatalf("messageToRecord returned error: %v", err)
+		t.Fatalf("Publish returned error: %v", err)
 	}
-	if record.Topic != "payments" {
-		t.Fatalf("topic = %q, want payments", record.Topic)
+	if len(client.records) != 1 {
+		t.Fatalf("produced records = %d, want 1", len(client.records))
+	}
+	if client.records[0].Topic != "payments" {
+		t.Fatalf("topic = %q, want payments", client.records[0].Topic)
 	}
 }
