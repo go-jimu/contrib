@@ -15,8 +15,13 @@ type consumerClient interface {
 	Close()
 }
 
+type pollClient interface {
+	consumerClient
+	PollFetches(context.Context) kgo.Fetches
+}
+
 type Consumer struct {
-	client consumerClient
+	client pollClient
 	cfg    config
 	router *message.Router
 }
@@ -29,14 +34,14 @@ func NewConsumer(client *kgo.Client, opts ...Option) *Consumer {
 		}
 	}
 
-	var consumer consumerClient
+	var consumer pollClient
 	if client != nil {
 		consumer = client
 	}
 	return newConsumer(consumer, cfg)
 }
 
-func newConsumer(client consumerClient, cfg config) *Consumer {
+func newConsumer(client pollClient, cfg config) *Consumer {
 	return &Consumer{
 		client: client,
 		cfg:    cfg,
@@ -51,6 +56,31 @@ func (c *Consumer) Subscribe(handler message.Handler) error {
 func (c *Consumer) Close() {
 	if c.cfg.closeClient && c.client != nil {
 		c.client.Close()
+	}
+}
+
+func (c *Consumer) Run(ctx context.Context) error {
+	if c.client == nil {
+		return ErrNilClient
+	}
+
+	for {
+		fetches := c.client.PollFetches(ctx)
+		if err := fetches.Err(); err != nil {
+			if handlerErr := c.cfg.errorHandler(ctx, Error{
+				Stage: StagePoll,
+				Err:   err,
+			}); handlerErr != nil {
+				return handlerErr
+			}
+			continue
+		}
+
+		for iter := fetches.RecordIter(); !iter.Done(); {
+			if err := c.processRecord(ctx, iter.Next()); err != nil {
+				return err
+			}
+		}
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 type fakeConsumerClient struct {
 	records    []*kgo.Record
 	committed  []*kgo.Record
+	fetches    []kgo.Fetches
+	pollHooks  []func()
 	produceErr error
 	commitErr  error
 	closed     bool
@@ -31,6 +33,22 @@ func (f *fakeConsumerClient) ProduceSync(_ context.Context, records ...*kgo.Reco
 func (f *fakeConsumerClient) CommitRecords(_ context.Context, records ...*kgo.Record) error {
 	f.committed = append(f.committed, records...)
 	return f.commitErr
+}
+
+func (f *fakeConsumerClient) PollFetches(_ context.Context) kgo.Fetches {
+	if len(f.pollHooks) > 0 {
+		hook := f.pollHooks[0]
+		f.pollHooks = f.pollHooks[1:]
+		if hook != nil {
+			hook()
+		}
+	}
+	if len(f.fetches) == 0 {
+		return fetchError(context.Canceled)
+	}
+	fetches := f.fetches[0]
+	f.fetches = f.fetches[1:]
+	return fetches
 }
 
 func (f *fakeConsumerClient) Close() {
