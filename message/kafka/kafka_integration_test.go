@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,12 +22,57 @@ type integrationHandler struct {
 	handle func(context.Context, message.Message) error
 }
 
+type integrationRun struct {
+	cancel context.CancelFunc
+	errCh  chan error
+	once   sync.Once
+	err    error
+}
+
 func (h integrationHandler) Listening() []message.Kind {
 	return h.kinds
 }
 
 func (h integrationHandler) Handle(ctx context.Context, msg message.Message) error {
 	return h.handle(ctx, msg)
+}
+
+func startIntegrationRun(t *testing.T, consumer *Consumer) *integrationRun {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	run := &integrationRun{
+		cancel: cancel,
+		errCh:  make(chan error, 1),
+	}
+	go func() {
+		run.errCh <- consumer.Run(ctx)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		if err := run.wait(30 * time.Second); err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("wait for consumer Run cleanup: %v", err)
+		}
+	})
+
+	return run
+}
+
+func (r *integrationRun) stopAndWait(timeout time.Duration) error {
+	r.cancel()
+	return r.wait(timeout)
+}
+
+func (r *integrationRun) wait(timeout time.Duration) error {
+	r.once.Do(func() {
+		select {
+		case r.err = <-r.errCh:
+		case <-time.After(timeout):
+			r.err = fmt.Errorf("timed out waiting for consumer Run to exit")
+		}
+	})
+	return r.err
 }
 
 func startKafka(t *testing.T) []string {
@@ -95,24 +141,17 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 	consumer := NewConsumer(client, WithPayloadResolver(integrationPayloadResolver))
 	publisher := NewPublisher(client)
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
 	received := make(chan message.Message, 1)
 	if err := consumer.Subscribe(integrationHandler{
 		kinds: []message.Kind{message.Kind(topic)},
 		handle: func(_ context.Context, msg message.Message) error {
 			received <- msg
-			cancelRun()
 			return nil
 		},
 	}); err != nil {
 		t.Fatalf("subscribe handler: %v", err)
 	}
-
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- consumer.Run(runCtx)
-	}()
+	run := startIntegrationRun(t, consumer)
 
 	msg, err := message.New(
 		message.Kind(topic),
@@ -151,13 +190,8 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 		t.Fatalf("payload = {Id:%d Name:%q}, want {Id:7 Name:%q}", payload.GetId(), payload.GetName(), "paid")
 	}
 
-	select {
-	case err := <-runErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run error = %v, want %v", err, context.Canceled)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for consumer Run to exit")
+	if err := run.stopAndWait(30 * time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
 	}
 }
 
@@ -183,12 +217,7 @@ func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
 		t.Fatalf("subscribe handler: %v", err)
 	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- consumer.Run(runCtx)
-	}()
+	run := startIntegrationRun(t, consumer)
 
 	msg, err := message.New(
 		message.Kind(sourceTopic),
@@ -220,14 +249,8 @@ func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
 		t.Fatalf("failed stage header = %q, want %q", got, StageHandle)
 	}
 
-	cancelRun()
-	select {
-	case err := <-runErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run error = %v, want %v", err, context.Canceled)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for source consumer Run to exit")
+	if err := run.stopAndWait(30 * time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
 	}
 }
 
@@ -236,16 +259,19 @@ func pollOneRecord(t *testing.T, client *kgo.Client, timeout time.Duration) *kgo
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var lastErr error
 
 	for {
 		fetches := client.PollFetches(ctx)
 		if ctx.Err() != nil {
-			t.Fatalf("timed out waiting for kafka record: %v", ctx.Err())
+			t.Fatalf("timed out waiting for kafka record: %v; last fetch error: %v", ctx.Err(), lastErr)
 		}
 		for _, fetchErr := range fetches.Errors() {
 			if errors.Is(fetchErr.Err, context.Canceled) || errors.Is(fetchErr.Err, context.DeadlineExceeded) {
-				t.Fatalf("poll retry record: %v", fetchErr.Err)
+				t.Fatalf("poll retry record: %v; last fetch error: %v", fetchErr.Err, lastErr)
 			}
+			lastErr = fetchErr.Err
+			t.Logf("poll retry record fetch error: %v", fetchErr.Err)
 		}
 		for iter := fetches.RecordIter(); !iter.Done(); {
 			return iter.Next()
