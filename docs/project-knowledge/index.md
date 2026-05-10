@@ -1,7 +1,7 @@
 ---
 last_updated: 2026-05-10
 updated_by: superpowers-memory:update
-covers_branch: release/message@c5e30f0
+covers_branch: release/message@d58b024
 triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 ---
 
@@ -20,12 +20,12 @@ Key points: config providers cover Apollo, etcd, Kubernetes, and Nacos; logging 
 ## tech-stack.md
 
 Language, workspace, CI, and key SDK dependencies.
-Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; config modules and Kafka use `components` v0.8.0.
+Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; all provider modules use `components` v0.8.0 and CI avoids deprecated artifact actions.
 
 ## conventions.md
 
 Project-specific layout, adapter, testing, messaging, and release conventions.
-Key points: new providers belong in `go.work` and release matrix; Kafka consumers require manual commit semantics and Docker-backed integration tests use the `integration` tag.
+Key points: new providers belong in `go.work` and release matrix; repository Codex config must not contain secrets; Kafka integration tests use the `integration` tag.
 
 ## decisions.md
 

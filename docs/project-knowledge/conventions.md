@@ -11,6 +11,7 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 - Add each provider as its own Go module under a capability/provider path, for example `config/etcd` or `logger/zap`.
 - Add new provider modules to `go.work` so local workspace tests include them.
 - Keep provider README files short and focused on package usage or source lineage.
+- Keep repository-scoped Codex settings in `.codex/config.toml`; never store credentials or service tokens there.
 
 ## Component Adapter Style
 
@@ -38,5 +39,6 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 
 - CI runs on `master` push, pull requests to `master`, and semantic version tags.
 - CI uses a Go 1.25.x matrix.
+- CI workflow actions should stay on supported major versions; deprecated artifact actions break before tests start.
 - Tagged releases create package-scoped tags for listed subpackages in the GitHub Actions matrix.
 - When adding a new provider module, update release automation if it should receive package-scoped tags.
