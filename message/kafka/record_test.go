@@ -108,12 +108,12 @@ func TestRecordMappingUsesCustomHeaderNames(t *testing.T) {
 		OccurredAt:  "x-occurred-at",
 	}
 	WithHeaderNames(customHeaders)(&cfg)
-	cfg.payloadResolver = func(kind message.Kind) (proto.Message, error) {
+	cfg.payloadResolver = message.PayloadResolverFunc(func(kind message.Kind) (proto.Message, error) {
 		if kind != "order.payment.v1.OrderPaid" {
 			t.Fatalf("payload resolver kind = %q, want order.payment.v1.OrderPaid", kind)
 		}
 		return &testdata.TestModel{}, nil
-	}
+	})
 	occurredAt := time.Date(2026, 5, 10, 13, 0, 0, 0, time.UTC)
 	msg, err := message.New(
 		"order.payment.v1.OrderPaid",
@@ -193,12 +193,12 @@ func TestRecordMappingUsesCustomHeaderNames(t *testing.T) {
 // Intent: consuming a Kafka record should reconstruct the message envelope and protobuf payload for handlers.
 func TestRecordToMessageReconstructsMessage(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.payloadResolver = func(kind message.Kind) (proto.Message, error) {
+	cfg.payloadResolver = message.PayloadResolverFunc(func(kind message.Kind) (proto.Message, error) {
 		if kind != "order.payment.v1.OrderPaid" {
 			t.Fatalf("payload resolver kind = %q, want order.payment.v1.OrderPaid", kind)
 		}
 		return &testdata.TestModel{}, nil
-	}
+	})
 	occurredAt := time.Date(2026, 5, 10, 12, 30, 0, 123, time.UTC)
 	value, err := cfg.codec.Marshal(testPayload(t))
 	if err != nil {
@@ -279,9 +279,9 @@ func TestRecordToMessageRejectsNilRecord(t *testing.T) {
 // Intent: malformed occurred-at headers should fail rather than silently changing event time semantics.
 func TestRecordToMessageRejectsInvalidOccurredAt(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.payloadResolver = func(message.Kind) (proto.Message, error) {
+	cfg.payloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
 		return &testdata.TestModel{}, nil
-	}
+	})
 	value, err := cfg.codec.Marshal(testPayload(t))
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
@@ -307,17 +307,17 @@ func TestRecordToMessageRejectsInvalidOccurredAt(t *testing.T) {
 // Intent: a resolver that cannot allocate a payload should fail before decode so corrupt handler inputs are not created.
 func TestRecordToMessageRejectsNilPayloadResolverResult(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.payloadResolver = func(message.Kind) (proto.Message, error) {
+	cfg.payloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
 		return nil, nil
-	}
+	})
 	record := &kgo.Record{
 		Headers: []kgo.RecordHeader{{Key: cfg.headerNames.MessageKind, Value: []byte("order.payment.v1.OrderPaid")}},
 	}
 
 	msg, err := recordToMessage(record, cfg)
 
-	if !errors.Is(err, ErrNilPayload) {
-		t.Fatalf("recordToMessage error = %v, want %v", err, ErrNilPayload)
+	if !errors.Is(err, message.ErrNilPayloadFactory) {
+		t.Fatalf("recordToMessage error = %v, want %v", err, message.ErrNilPayloadFactory)
 	}
 	if msg.Kind() != "" || msg.Payload() != nil {
 		t.Fatalf("message = %#v, want zero", msg)
@@ -327,18 +327,18 @@ func TestRecordToMessageRejectsNilPayloadResolverResult(t *testing.T) {
 // Intent: typed-nil protobuf resolver results should fail as nil payloads instead of reaching protobuf decode and panicking.
 func TestRecordToMessageRejectsTypedNilPayloadResolverResult(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.payloadResolver = func(message.Kind) (proto.Message, error) {
+	cfg.payloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
 		var payload *testdata.TestModel
 		return payload, nil
-	}
+	})
 	record := &kgo.Record{
 		Headers: []kgo.RecordHeader{{Key: cfg.headerNames.MessageKind, Value: []byte("order.payment.v1.OrderPaid")}},
 	}
 
 	msg, err := recordToMessage(record, cfg)
 
-	if !errors.Is(err, ErrNilPayload) {
-		t.Fatalf("recordToMessage error = %v, want %v", err, ErrNilPayload)
+	if !errors.Is(err, message.ErrNilPayloadFactory) {
+		t.Fatalf("recordToMessage error = %v, want %v", err, message.ErrNilPayloadFactory)
 	}
 	if msg.Kind() != "" || msg.Payload() != nil {
 		t.Fatalf("message = %#v, want zero", msg)

@@ -10,7 +10,9 @@ import (
 
 type TopicResolver func(message.Message) (string, error)
 type KindResolver func(*kgo.Record) (message.Kind, error)
-type PayloadResolver func(message.Kind) (proto.Message, error)
+
+// PayloadResolver is the upstream transport-neutral message payload resolver.
+type PayloadResolver = message.PayloadResolver
 type ErrorHandler func(context.Context, Error) error
 type FailureTopicResolver func(Error) (string, error)
 
@@ -90,9 +92,9 @@ func defaultKindResolver(headers HeaderNames) KindResolver {
 	}
 }
 
-func defaultPayloadResolver(message.Kind) (proto.Message, error) {
+var defaultPayloadResolver PayloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
 	return nil, ErrNoPayloadResolver
-}
+})
 
 func defaultErrorHandler(_ context.Context, failure Error) error {
 	return failure.Err
@@ -158,6 +160,14 @@ func WithPayloadResolver(resolver PayloadResolver) Option {
 			cfg.payloadResolver = resolver
 		}
 	}
+}
+
+// WithPayloadResolverFunc adapts a function into message.PayloadResolver.
+func WithPayloadResolverFunc(resolver func(message.Kind) (proto.Message, error)) Option {
+	if resolver == nil {
+		return WithPayloadResolver(nil)
+	}
+	return WithPayloadResolver(message.PayloadResolverFunc(resolver))
 }
 
 func WithErrorHandler(handler ErrorHandler) Option {

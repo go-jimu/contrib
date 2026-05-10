@@ -73,7 +73,7 @@ func recordToMessage(record *kgo.Record, cfg config) (message.Message, error) {
 		return message.Message{}, ErrNoPayloadResolver
 	}
 
-	payload, err := cfg.payloadResolver(kind)
+	payload, err := cfg.payloadResolver.Resolve(kind)
 	if err != nil {
 		return message.Message{}, err
 	}

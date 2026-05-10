@@ -138,7 +138,7 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 	topic := uniqueIntegrationName("orders-paid")
 	group := uniqueIntegrationName("orders-paid-group")
 	client := newIntegrationClient(t, brokers, group, topic)
-	consumer := NewConsumer(client, WithPayloadResolver(integrationPayloadResolver))
+	consumer := NewConsumer(client, WithPayloadResolverFunc(integrationPayloadResolver))
 	publisher := NewPublisher(client)
 
 	received := make(chan message.Message, 1)
@@ -204,7 +204,7 @@ func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
 	retryGroup := uniqueIntegrationName("orders-retry-group")
 	sourceClient := newIntegrationClient(t, brokers, sourceGroup, sourceTopic)
 	retryClient := newIntegrationClient(t, brokers, retryGroup, retryTopic)
-	consumer := NewConsumer(sourceClient, WithPayloadResolver(integrationPayloadResolver))
+	consumer := NewConsumer(sourceClient, WithPayloadResolverFunc(integrationPayloadResolver))
 	publisher := NewPublisher(sourceClient)
 
 	handlerErr := errors.New("handler failed")

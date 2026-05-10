@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/go-jimu/components/ddd/message"
+	testdata "github.com/go-jimu/components/encoding/testdata"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/protobuf/proto"
 )
 
 // Intent: by default a message kind should be usable as the Kafka topic so a minimal publisher works without topic configuration.
@@ -82,7 +84,7 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatalf("kind resolver kind = %q, want %q", kind, "order.payment.v1.OrderPaid")
 	}
 
-	payload, err := cfg.payloadResolver("order.payment.v1.OrderPaid")
+	payload, err := cfg.payloadResolver.Resolve("order.payment.v1.OrderPaid")
 	if !errors.Is(err, ErrNoPayloadResolver) {
 		t.Fatalf("payload resolver error = %v, want %v", err, ErrNoPayloadResolver)
 	}
@@ -109,6 +111,27 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 	}
 	if cfg.closeClient != defaultCloseClient {
 		t.Fatalf("closeClient = %v, want %v", cfg.closeClient, defaultCloseClient)
+	}
+}
+
+// Intent: Kafka consumers should use the upstream message payload registry directly instead of a provider-private resolver type.
+func TestWithPayloadResolverAcceptsMessagePayloadRegistry(t *testing.T) {
+	cfg := defaultConfig()
+	registry := message.NewPayloadRegistry()
+	if err := registry.Register("test.test_model", func() proto.Message {
+		return &testdata.TestModel{}
+	}); err != nil {
+		t.Fatalf("register payload: %v", err)
+	}
+
+	WithPayloadResolver(registry)(&cfg)
+
+	payload, err := cfg.payloadResolver.Resolve("test.test_model")
+	if err != nil {
+		t.Fatalf("payload resolver error = %v", err)
+	}
+	if _, ok := payload.(*testdata.TestModel); !ok {
+		t.Fatalf("payload type = %T, want *testdata.TestModel", payload)
 	}
 }
 

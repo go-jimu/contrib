@@ -74,7 +74,7 @@ func (h *testHandler) Handle(_ context.Context, msg message.Message) error {
 
 func testConsumerConfig() config {
 	cfg := defaultConfig()
-	WithPayloadResolver(func(message.Kind) (proto.Message, error) {
+	WithPayloadResolverFunc(func(message.Kind) (proto.Message, error) {
 		return &testdata.TestModel{}, nil
 	})(&cfg)
 	return cfg
