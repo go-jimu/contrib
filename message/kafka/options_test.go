@@ -1,10 +1,12 @@
 package kafka
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/go-jimu/components/ddd/message"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // Intent: by default a message kind should be usable as the Kafka topic so a minimal publisher works without topic configuration.
@@ -39,13 +41,8 @@ func TestDefaultTopicResolverRejectsEmptyKind(t *testing.T) {
 func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 	cfg := defaultConfig()
 	defaultCodec := cfg.codec
-	defaultTopicResolver := cfg.topicResolver
-	defaultKindResolver := cfg.kindResolver
-	defaultPayloadResolver := cfg.payloadResolver
-	defaultErrorHandler := cfg.errorHandler
-	defaultRetryPolicy := cfg.retryPolicy
-	defaultDLQPolicy := cfg.dlqPolicy
 	defaultHeaders := cfg.headerNames
+	defaultCloseClient := cfg.closeClient
 
 	for _, opt := range []Option{
 		WithCodec(nil),
@@ -62,26 +59,61 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 	if cfg.codec != defaultCodec {
 		t.Fatal("nil codec option overwrote default codec")
 	}
-	if cfg.topicResolver == nil || defaultTopicResolver == nil {
-		t.Fatal("topic resolver should remain configured")
+
+	msg := newTestMessage(t, "order.payment.v1.OrderPaid")
+	topic, err := cfg.topicResolver(msg)
+	if err != nil {
+		t.Fatalf("topic resolver returned error: %v", err)
 	}
-	if cfg.kindResolver == nil || defaultKindResolver == nil {
-		t.Fatal("kind resolver should remain configured")
+	if topic != "order.payment.v1.OrderPaid" {
+		t.Fatalf("topic resolver topic = %q, want %q", topic, "order.payment.v1.OrderPaid")
 	}
-	if cfg.payloadResolver == nil || defaultPayloadResolver == nil {
-		t.Fatal("payload resolver should remain configured")
+
+	kind, err := cfg.kindResolver(&kgo.Record{
+		Headers: []kgo.RecordHeader{{
+			Key:   defaultHeaders.MessageKind,
+			Value: []byte("order.payment.v1.OrderPaid"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("kind resolver returned error: %v", err)
 	}
-	if cfg.errorHandler == nil || defaultErrorHandler == nil {
-		t.Fatal("error handler should remain configured")
+	if kind != "order.payment.v1.OrderPaid" {
+		t.Fatalf("kind resolver kind = %q, want %q", kind, "order.payment.v1.OrderPaid")
 	}
-	if cfg.retryPolicy == nil || defaultRetryPolicy == nil {
-		t.Fatal("retry policy should remain configured")
+
+	payload, err := cfg.payloadResolver("order.payment.v1.OrderPaid")
+	if !errors.Is(err, ErrNoPayloadResolver) {
+		t.Fatalf("payload resolver error = %v, want %v", err, ErrNoPayloadResolver)
 	}
-	if cfg.dlqPolicy == nil || defaultDLQPolicy == nil {
-		t.Fatal("DLQ policy should remain configured")
+	if payload != nil {
+		t.Fatalf("payload resolver payload = %#v, want nil", payload)
+	}
+
+	if err := cfg.errorHandler(context.Background(), Error{Err: ErrUnhandledMessage}); err != nil {
+		t.Fatalf("error handler returned error: %v", err)
+	}
+
+	retry, err := cfg.retryPolicy(Error{Err: ErrUnhandledMessage})
+	if err != nil {
+		t.Fatalf("retry policy returned error: %v", err)
+	}
+	if !retry {
+		t.Fatal("retry policy = false, want true")
+	}
+
+	dlq, err := cfg.dlqPolicy(Error{Err: ErrUnhandledMessage})
+	if err != nil {
+		t.Fatalf("DLQ policy returned error: %v", err)
+	}
+	if !dlq {
+		t.Fatal("DLQ policy = false, want true")
 	}
 	if cfg.headerNames != defaultHeaders {
 		t.Fatalf("header names = %#v, want %#v", cfg.headerNames, defaultHeaders)
+	}
+	if cfg.closeClient != defaultCloseClient {
+		t.Fatalf("closeClient = %v, want %v", cfg.closeClient, defaultCloseClient)
 	}
 }
 
