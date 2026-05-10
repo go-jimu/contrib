@@ -2,10 +2,12 @@ package kafka
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/protobuf/proto"
 )
 
 func messageToRecord(msg message.Message, cfg config) (*kgo.Record, error) {
@@ -54,7 +56,7 @@ func messageToRecord(msg message.Message, cfg config) (*kgo.Record, error) {
 
 func recordToMessage(record *kgo.Record, cfg config) (message.Message, error) {
 	if record == nil {
-		return message.Message{}, ErrNoKind
+		return message.Message{}, ErrNilRecord
 	}
 	if cfg.kindResolver == nil {
 		return message.Message{}, ErrNoKind
@@ -75,7 +77,7 @@ func recordToMessage(record *kgo.Record, cfg config) (message.Message, error) {
 	if err != nil {
 		return message.Message{}, err
 	}
-	if payload == nil {
+	if isNilProtoMessage(payload) {
 		return message.Message{}, ErrNilPayload
 	}
 	if err = cfg.codec.Unmarshal(record.Value, payload); err != nil {
@@ -109,6 +111,19 @@ func recordToMessage(record *kgo.Record, cfg config) (message.Message, error) {
 	}
 
 	return message.New(kind, payload, opts...)
+}
+
+func isNilProtoMessage(msg proto.Message) bool {
+	if msg == nil {
+		return true
+	}
+	value := reflect.ValueOf(msg)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func cloneRecord(record *kgo.Record) *kgo.Record {

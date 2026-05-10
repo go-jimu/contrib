@@ -173,6 +173,20 @@ func TestRecordToMessageRequiresPayloadResolver(t *testing.T) {
 	}
 }
 
+// Intent: nil Kafka records should fail with a protocol-level error before kind or payload resolution.
+func TestRecordToMessageRejectsNilRecord(t *testing.T) {
+	cfg := defaultConfig()
+
+	msg, err := recordToMessage(nil, cfg)
+
+	if !errors.Is(err, ErrNilRecord) {
+		t.Fatalf("recordToMessage error = %v, want %v", err, ErrNilRecord)
+	}
+	if msg.Kind() != "" || msg.Payload() != nil {
+		t.Fatalf("message = %#v, want zero", msg)
+	}
+}
+
 // Intent: malformed occurred-at headers should fail rather than silently changing event time semantics.
 func TestRecordToMessageRejectsInvalidOccurredAt(t *testing.T) {
 	cfg := defaultConfig()
@@ -206,6 +220,27 @@ func TestRecordToMessageRejectsNilPayloadResolverResult(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.payloadResolver = func(message.Kind) (proto.Message, error) {
 		return nil, nil
+	}
+	record := &kgo.Record{
+		Headers: []kgo.RecordHeader{{Key: cfg.headerNames.MessageKind, Value: []byte("order.payment.v1.OrderPaid")}},
+	}
+
+	msg, err := recordToMessage(record, cfg)
+
+	if !errors.Is(err, ErrNilPayload) {
+		t.Fatalf("recordToMessage error = %v, want %v", err, ErrNilPayload)
+	}
+	if msg.Kind() != "" || msg.Payload() != nil {
+		t.Fatalf("message = %#v, want zero", msg)
+	}
+}
+
+// Intent: typed-nil protobuf resolver results should fail as nil payloads instead of reaching protobuf decode and panicking.
+func TestRecordToMessageRejectsTypedNilPayloadResolverResult(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.payloadResolver = func(message.Kind) (proto.Message, error) {
+		var payload *testdata.TestModel
+		return payload, nil
 	}
 	record := &kgo.Record{
 		Headers: []kgo.RecordHeader{{Key: cfg.headerNames.MessageKind, Value: []byte("order.payment.v1.OrderPaid")}},

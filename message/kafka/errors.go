@@ -4,6 +4,7 @@ import "errors"
 
 var (
 	ErrNilClient          = errors.New("kafka client is nil")
+	ErrNilRecord          = errors.New("kafka record is nil")
 	ErrNilMessage         = errors.New("message is nil")
 	ErrNilPayload         = errors.New("message payload is nil")
 	ErrNoTopic            = errors.New("kafka topic is empty")
