@@ -1,7 +1,7 @@
 ---
 last_updated: 2026-05-10
-updated_by: superpowers-memory:rebuild
-triggered_by_plan: null
+updated_by: superpowers-memory:update
+triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 ---
 
 # Decisions

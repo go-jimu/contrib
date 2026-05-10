@@ -1,7 +1,7 @@
 ---
 last_updated: 2026-05-10
-updated_by: superpowers-memory:rebuild
-triggered_by_plan: null
+updated_by: superpowers-memory:update
+triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 ---
 
 # Features
@@ -62,15 +62,21 @@ triggered_by_plan: null
 
 **References** — `logger/zap/README.md`, `logger/zap/logger.go`
 
-## In Progress
-
 ### Messaging Providers
 
-#### Kafka DDD Message Adapter
+#### Kafka Message Provider
 
-**Intent** — Add a Kafka-backed implementation for the external ddd message component contract.
+**Enables** — Consumer services can publish and consume `components/ddd/message` messages through Kafka while keeping topic, offset, retry, and DLQ concerns inside the provider.
 
-**Source** — Current brainstorming task.
+**Actors / Entry Points** — Go applications import `github.com/go-jimu/contrib/message/kafka`, pass a franz-go client to `NewPublisher` or `NewConsumer`, and subscribe `message.Handler` implementations.
+
+**Capability Boundary** — Covers protobuf payload encoding, payload resolution on consume, Kafka record key mapping from `Message.Key()`, reserved metadata headers, manual offset commit, retry topic handoff, and DLQ handoff; broker wiring is described in architecture.md §Scenario Sequences.
+
+**References** — `message/kafka/README.md`, `message/kafka/publisher.go`, `message/kafka/consumer.go`
+
+## In Progress
+
+No in-progress capabilities are recorded in the repository.
 
 ## Planned
 
