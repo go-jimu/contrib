@@ -120,6 +120,7 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 // Intent: header names must be replaceable so callers can avoid collisions with existing Kafka header conventions.
 func TestOptionsHeaderOverride(t *testing.T) {
 	cfg := defaultConfig()
+	defaultHeaders := cfg.headerNames
 
 	WithHeaderNames(HeaderNames{
 		MessageID:   "x-message-id",
@@ -135,6 +136,54 @@ func TestOptionsHeaderOverride(t *testing.T) {
 	}
 	if cfg.headerNames.OccurredAt != "x-occurred-at" {
 		t.Fatalf("occurred at header = %q", cfg.headerNames.OccurredAt)
+	}
+
+	kind, err := cfg.kindResolver(&kgo.Record{
+		Headers: []kgo.RecordHeader{{
+			Key:   "x-message-kind",
+			Value: []byte("order.payment.v1.OrderPaid"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("kind resolver with override header returned error: %v", err)
+	}
+	if kind != "order.payment.v1.OrderPaid" {
+		t.Fatalf("kind resolver kind = %q, want %q", kind, "order.payment.v1.OrderPaid")
+	}
+
+	kind, err = cfg.kindResolver(&kgo.Record{
+		Headers: []kgo.RecordHeader{{
+			Key:   defaultHeaders.MessageKind,
+			Value: []byte("order.payment.v1.OrderPaid"),
+		}},
+	})
+	if !errors.Is(err, ErrNoKind) {
+		t.Fatalf("kind resolver with old header error = %v, want %v", err, ErrNoKind)
+	}
+	if kind != "" {
+		t.Fatalf("kind resolver with old header kind = %q, want empty", kind)
+	}
+}
+
+// Intent: changing header names must not replace a caller-provided kind resolver because custom routing may ignore headers.
+func TestOptionsHeaderOverridePreservesCustomKindResolver(t *testing.T) {
+	cfg := defaultConfig()
+	WithKindResolver(func(*kgo.Record) (message.Kind, error) {
+		return "custom.Kind", nil
+	})(&cfg)
+
+	WithHeaderNames(HeaderNames{
+		MessageID:   "x-message-id",
+		MessageKind: "x-message-kind",
+		OccurredAt:  "x-occurred-at",
+	})(&cfg)
+
+	kind, err := cfg.kindResolver(&kgo.Record{})
+	if err != nil {
+		t.Fatalf("custom kind resolver returned error: %v", err)
+	}
+	if kind != "custom.Kind" {
+		t.Fatalf("kind resolver kind = %q, want custom.Kind", kind)
 	}
 }
 

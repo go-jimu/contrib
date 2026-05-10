@@ -27,27 +27,29 @@ type HeaderNames struct {
 }
 
 type config struct {
-	codec           Codec
-	topicResolver   TopicResolver
-	kindResolver    KindResolver
-	payloadResolver PayloadResolver
-	errorHandler    ErrorHandler
-	retryPolicy     RetryPolicy
-	dlqPolicy       DLQPolicy
-	closeClient     bool
-	headerNames     HeaderNames
+	codec               Codec
+	topicResolver       TopicResolver
+	kindResolver        KindResolver
+	defaultKindResolver bool
+	payloadResolver     PayloadResolver
+	errorHandler        ErrorHandler
+	retryPolicy         RetryPolicy
+	dlqPolicy           DLQPolicy
+	closeClient         bool
+	headerNames         HeaderNames
 }
 
 func defaultConfig() config {
 	return config{
-		codec:           ProtoCodec{},
-		topicResolver:   defaultTopicResolver,
-		kindResolver:    defaultKindResolver(defaultHeaderNames()),
-		payloadResolver: defaultPayloadResolver,
-		errorHandler:    defaultErrorHandler,
-		retryPolicy:     defaultRetryPolicy,
-		dlqPolicy:       defaultDLQPolicy,
-		headerNames:     defaultHeaderNames(),
+		codec:               ProtoCodec{},
+		topicResolver:       defaultTopicResolver,
+		kindResolver:        defaultKindResolver(defaultHeaderNames()),
+		defaultKindResolver: true,
+		payloadResolver:     defaultPayloadResolver,
+		errorHandler:        defaultErrorHandler,
+		retryPolicy:         defaultRetryPolicy,
+		dlqPolicy:           defaultDLQPolicy,
+		headerNames:         defaultHeaderNames(),
 	}
 }
 
@@ -119,6 +121,7 @@ func WithKindResolver(resolver KindResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
 			cfg.kindResolver = resolver
+			cfg.defaultKindResolver = false
 		}
 	}
 }
@@ -167,6 +170,8 @@ func WithHeaderNames(headers HeaderNames) Option {
 			return
 		}
 		cfg.headerNames = headers
-		cfg.kindResolver = defaultKindResolver(headers)
+		if cfg.defaultKindResolver {
+			cfg.kindResolver = defaultKindResolver(headers)
+		}
 	}
 }
