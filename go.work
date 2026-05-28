@@ -8,4 +8,5 @@ use (
 	./config/kubernetes
 	./logger/zap
 	./message/kafka
+	./taskqueue/asynq
 )
