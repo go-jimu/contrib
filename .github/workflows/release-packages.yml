@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [config/etcd, config/nacos, config/kubernetes, config/apollo, logger/zap, message/kafka]
+        package: [config/etcd, config/nacos, config/kubernetes, config/apollo, logger/zap, message/kafka, taskqueue/asynq]
     steps:
       - name: Check out code
         uses: actions/checkout@v4
