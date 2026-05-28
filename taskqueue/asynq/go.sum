@@ -8,8 +8,8 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
 github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
-github.com/go-jimu/components v0.9.3 h1:g+i+qWLaHwogeJvz70tUi+EQkq5EPFZB1lNsLuNODis=
-github.com/go-jimu/components v0.9.3/go.mod h1:mkdTfwcGRyEpXgB/jvrHDoHYzgpRP02hZ/B5o7Gqews=
+github.com/go-jimu/components v0.9.4 h1:BoH2C1oQyUjgZPSOb7osvLnyc0f9QKz/VlqhUj/C9MU=
+github.com/go-jimu/components v0.9.4/go.mod h1:mkdTfwcGRyEpXgB/jvrHDoHYzgpRP02hZ/B5o7Gqews=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=

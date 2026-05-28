@@ -17,15 +17,17 @@ go get github.com/go-jimu/contrib/taskqueue/asynq@latest
 
 1. Create one `taskqueue.SchemaRegistry` in application composition code.
 2. Register each task payload struct with a `taskqueue.Definition`.
-3. Create an asynq client/server in infrastructure wiring.
-4. Wrap the asynq client with `asynq.NewClient` and enqueue component tasks.
-5. Register one `taskqueue.Processor` per `TaskType` on `asynq.NewServer`.
-6. Start the server by calling `Run(ctx)` from lifecycle code.
+3. Create an asynq client/worker in infrastructure wiring.
+4. Wrap the asynq client with `taskasynq.NewClient` and enqueue component tasks.
+5. Register one `taskqueue.Processor` per `TaskType` on `taskasynq.NewWorker`.
+6. Start the worker by calling `Start(ctx)` from lifecycle code, or use
+   `Run(ctx)` when a blocking runner is more convenient.
 
 This package does not start HTTP services, Redis processes, or background
-workers during construction or registration. `Run(ctx)` is the only helper that
-starts an asynq worker, and it must be called explicitly by application
-lifecycle code.
+workers during construction or registration. `Start(ctx)` and `Run(ctx)` are
+the only helpers that start an asynq worker, and they must be called explicitly
+by application lifecycle code. `Shutdown(ctx)` stops accepting new tasks and
+delegates to asynq graceful shutdown.
 
 ## Mapping
 
@@ -104,12 +106,12 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	server := taskasynq.NewRedisServer(
+	worker := taskasynq.NewRedisWorker(
 		asynq.RedisClientOpt{Addr: "localhost:6379"},
 		asynq.Config{Queues: map[string]int{"reconcile": 1}},
 	)
 
-	if err := server.Register(taskqueue.NewProcessor(def.Type, func(ctx context.Context, task taskqueue.Task) error {
+	if err := worker.Register(taskqueue.NewProcessor(def.Type, func(ctx context.Context, task taskqueue.Task) error {
 		payload, err := registry.DecodeJSON(task)
 		if err != nil {
 			return err
@@ -121,12 +123,16 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	return server.Run(ctx)
+	return worker.Run(ctx)
 }
 ```
 
 `taskqueue.ErrSkipRetry` is translated to `asynq.SkipRetry`, so processors can
 make non-retryable decisions without importing asynq.
+
+Asynq worker metadata is exposed through `taskqueue.ExecutionInfoFromContext`.
+Processors and middleware can read provider task ID, queue, retry count, and
+max retry from the context without importing asynq.
 
 This package does not create a global schema registry. Applications own registry
 instances and pass tasks/processors through normal dependency injection.
