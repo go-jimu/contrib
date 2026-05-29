@@ -24,9 +24,8 @@ type Scheduler struct {
 }
 
 var (
-	_ taskqueue.PeriodicTaskRegistrar = (*Scheduler)(nil)
+	_ taskqueue.PeriodicTaskScheduler = (*Scheduler)(nil)
 	_ taskqueue.Runner                = (*Scheduler)(nil)
-	_ taskqueue.Worker                = (*Scheduler)(nil)
 )
 
 // NewScheduler wraps an asynq scheduler.

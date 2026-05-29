@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/taskqueue/asynq
 go 1.25.0
 
 require (
-	github.com/go-jimu/components v0.9.5
+	github.com/go-jimu/components v0.9.6
 	github.com/hibiken/asynq v0.26.0
 )
 
