@@ -8,12 +8,16 @@ import (
 )
 
 func taskToAsynq(task taskqueue.Task, opts ...taskqueue.EnqueueOption) (*hibiken.Task, []hibiken.Option, error) {
+	return taskToAsynqWithPolicy(task, taskqueue.NewEnqueueOptions(opts...))
+}
+
+func taskToAsynqWithPolicy(task taskqueue.Task, policy taskqueue.EnqueueOptions) (*hibiken.Task, []hibiken.Option, error) {
 	if task.Type() == "" {
 		return nil, nil, taskqueue.ErrEmptyType
 	}
 
 	asynqTask := hibiken.NewTaskWithHeaders(string(task.Type()), task.Payload(), task.Headers())
-	return asynqTask, enqueueOptions(task, opts...), nil
+	return asynqTask, enqueueOptions(task, policy), nil
 }
 
 func taskFromAsynq(ctx context.Context, task *hibiken.Task) (taskqueue.Task, error) {
@@ -39,8 +43,7 @@ func taskFromAsynq(ctx context.Context, task *hibiken.Task) (taskqueue.Task, err
 	}, task.Payload(), options...)
 }
 
-func enqueueOptions(task taskqueue.Task, opts ...taskqueue.EnqueueOption) []hibiken.Option {
-	cfg := taskqueue.NewEnqueueOptions(opts...)
+func enqueueOptions(task taskqueue.Task, cfg taskqueue.EnqueueOptions) []hibiken.Option {
 	options := make([]hibiken.Option, 0, 8)
 
 	if task.Queue() != "" {
