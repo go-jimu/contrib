@@ -104,8 +104,44 @@ func TestSchedulerRegisterPeriodicTaskMapsInterval(t *testing.T) {
 	}
 }
 
+// Intent: The asynq adapter should rely on the component contract to reject
+// periodic schedules and policies that do not have stable repeated-enqueue
+// semantics before any provider registration happens.
+func TestSchedulerPeriodicContractRejectsUnsupportedOptions(t *testing.T) {
+	task, err := taskqueue.New(taskqueue.Definition{Type: "document.reconcile.v1"}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := taskqueue.IntervalSchedule(time.Minute, taskqueue.WithLocation("Asia/Shanghai")); !errors.Is(err, taskqueue.ErrInvalidScheduleOption) {
+		t.Fatalf("interval location error = %v, want ErrInvalidScheduleOption", err)
+	}
+
+	schedule, err := taskqueue.IntervalSchedule(time.Minute)
+	if err != nil {
+		t.Fatalf("IntervalSchedule: %v", err)
+	}
+	if _, err := taskqueue.NewPeriodicTask(
+		"document.reconcile",
+		schedule,
+		task,
+		taskqueue.WithProcessAt(time.Now().Add(time.Minute)),
+	); !errors.Is(err, taskqueue.ErrInvalidPeriodicTaskPolicy) {
+		t.Fatalf("process-at error = %v, want ErrInvalidPeriodicTaskPolicy", err)
+	}
+	if _, err := taskqueue.NewPeriodicTask(
+		"document.reconcile",
+		schedule,
+		task,
+		taskqueue.WithDeadline(time.Now().Add(time.Minute)),
+	); !errors.Is(err, taskqueue.ErrInvalidPeriodicTaskPolicy) {
+		t.Fatalf("deadline error = %v, want ErrInvalidPeriodicTaskPolicy", err)
+	}
+}
+
 // Intent: Scheduler registration should fail clearly for duplicate semantic
-// jobs or missing runtime instead of creating ambiguous periodic producers.
+// jobs within one scheduler instance or missing runtime instead of creating
+// ambiguous periodic producers.
 func TestSchedulerRegisterPeriodicTaskRejectsDuplicateAndNilRuntime(t *testing.T) {
 	fake := &fakeSchedulerRuntime{}
 	scheduler := newScheduler(fake)

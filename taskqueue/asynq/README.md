@@ -23,7 +23,7 @@ go get github.com/go-jimu/contrib/taskqueue/asynq@latest
 6. Start the worker by calling `Start(ctx)` from lifecycle code, or use
    `Run(ctx)` when a blocking runner is more convenient.
 7. For periodic producers, create a `taskqueue.PeriodicTask` and register it
-   on `taskasynq.NewRedisScheduler`.
+   on `taskasynq.NewRedisScheduler` from infrastructure/runtime wiring.
 
 This package does not start HTTP services, Redis processes, or background
 workers during construction or registration. `Start(ctx)` and `Run(ctx)` start
@@ -51,6 +51,15 @@ enqueueing and delegates to asynq graceful shutdown.
 `taskqueue.EnqueueOption` values map to asynq enqueue options:
 `WithDelay`, `WithProcessAt`, `WithMaxRetry`, `WithTimeout`, `WithDeadline`,
 and `WithUnique`.
+
+For periodic tasks, the component contract only accepts enqueue policies that
+make sense for repeated schedule fires. `WithUnique`, `WithMaxRetry`, and
+`WithTimeout` are safe common choices; `WithDelay` is allowed when each
+scheduled fire should enqueue work for later processing. Absolute timing
+policies such as `WithProcessAt` and `WithDeadline` are rejected by
+`taskqueue.NewPeriodicTask`, because a static absolute time becomes stale after
+the first fire. `IntervalSchedule` is duration-based and rejects `WithLocation`;
+use `CronSchedule(..., WithLocation(...))` for wall-clock timezone semantics.
 
 ## Enqueue
 
@@ -142,6 +151,11 @@ A periodic task is a periodic producer for a concrete `taskqueue.Task`. Keep
 business work in a task processor or application use case; the scheduler should
 only enqueue the semantic task.
 
+`NewRedisScheduler` is the recommended production entry point for the Redis
+backed asynq scheduler adapter. Keep it in runtime wiring (for example an
+`internal/pkg/taskqueue` package in an application); bounded-context or
+Application code should only provide `taskqueue.PeriodicTask` values.
+
 ```go
 package main
 
@@ -183,6 +197,12 @@ func runScheduler(ctx context.Context, task taskqueue.Task) error {
 
 To disable a periodic producer from runtime configuration, skip constructing or
 registering the `PeriodicTask` in application lifecycle wiring.
+
+`RegisterPeriodicTask` detects duplicate `PeriodicTask.Name()` values within
+one scheduler instance. Cross-process or cross-replica duplicate registration
+prevention is outside this adapter; run one scheduler, use leader election or a
+distributed lock, and keep task processors idempotent when multiple service
+replicas may exist.
 
 `taskqueue.ErrSkipRetry` is translated to `asynq.SkipRetry`, so processors can
 make non-retryable decisions without importing asynq.
