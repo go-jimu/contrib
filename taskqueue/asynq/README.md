@@ -22,12 +22,14 @@ go get github.com/go-jimu/contrib/taskqueue/asynq@latest
 5. Register one `taskqueue.Processor` per `TaskType` on `taskasynq.NewWorker`.
 6. Start the worker by calling `Start(ctx)` from lifecycle code, or use
    `Run(ctx)` when a blocking runner is more convenient.
+7. For periodic producers, create a `taskqueue.PeriodicTask` and register it
+   on `taskasynq.NewRedisScheduler`.
 
 This package does not start HTTP services, Redis processes, or background
-workers during construction or registration. `Start(ctx)` and `Run(ctx)` are
-the only helpers that start an asynq worker, and they must be called explicitly
-by application lifecycle code. `Shutdown(ctx)` stops accepting new tasks and
-delegates to asynq graceful shutdown.
+workers during construction or registration. `Start(ctx)` and `Run(ctx)` start
+an asynq worker or scheduler, and they must be called explicitly by application
+lifecycle code. `Shutdown(ctx)` stops accepting new task processing or periodic
+enqueueing and delegates to asynq graceful shutdown.
 
 ## Mapping
 
@@ -38,6 +40,13 @@ delegates to asynq graceful shutdown.
 | `Headers()` | asynq task headers |
 | `Queue()` | `asynq.Queue` enqueue option |
 | `Key()` | `asynq.TaskID` enqueue option |
+
+| `taskqueue.Schedule` field | asynq scheduler mapping |
+| --- | --- |
+| `CronSchedule(spec)` | asynq cron spec |
+| `CronSchedule(spec, WithLocation(location))` | `CRON_TZ=<location> <spec>` |
+| `IntervalSchedule(interval)` | `@every <duration>` |
+| `PeriodicTask.EnqueuePolicy()` | asynq enqueue options for each periodic enqueue |
 
 `taskqueue.EnqueueOption` values map to asynq enqueue options:
 `WithDelay`, `WithProcessAt`, `WithMaxRetry`, `WithTimeout`, `WithDeadline`,
@@ -126,6 +135,54 @@ func run(ctx context.Context) error {
 	return worker.Run(ctx)
 }
 ```
+
+## Periodic Task
+
+A periodic task is a periodic producer for a concrete `taskqueue.Task`. Keep
+business work in a task processor or application use case; the scheduler should
+only enqueue the semantic task.
+
+```go
+package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/go-jimu/components/taskqueue"
+	taskasynq "github.com/go-jimu/contrib/taskqueue/asynq"
+	"github.com/hibiken/asynq"
+)
+
+func runScheduler(ctx context.Context, task taskqueue.Task) error {
+	scheduler := taskasynq.NewRedisScheduler(
+		asynq.RedisClientOpt{Addr: "localhost:6379"},
+		&asynq.SchedulerOpts{},
+	)
+
+	schedule, err := taskqueue.CronSchedule("0 2 * * *", taskqueue.WithLocation("Asia/Shanghai"))
+	if err != nil {
+		return err
+	}
+	periodic, err := taskqueue.NewPeriodicTask(
+		"document.daily_review",
+		schedule,
+		task,
+		taskqueue.WithUnique(25*time.Hour),
+		taskqueue.WithMaxRetry(3),
+	)
+	if err != nil {
+		return err
+	}
+	if err := scheduler.RegisterPeriodicTask(periodic); err != nil {
+		return err
+	}
+	return scheduler.Run(ctx)
+}
+```
+
+To disable a periodic producer from runtime configuration, skip constructing or
+registering the `PeriodicTask` in application lifecycle wiring.
 
 `taskqueue.ErrSkipRetry` is translated to `asynq.SkipRetry`, so processors can
 make non-retryable decisions without importing asynq.
