@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -51,7 +50,7 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		WithTopicResolver(nil),
 		WithKindResolver(nil),
 		WithPayloadResolver(nil),
-		WithErrorHandler(nil),
+		WithErrorObserver(nil),
 		WithRetryTopicResolver(nil),
 		WithDLQTopicResolver(nil),
 	} {
@@ -92,25 +91,49 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatalf("payload resolver payload = %#v, want nil", payload)
 	}
 
-	if err := cfg.errorHandler(context.Background(), Error{Err: ErrUnhandledMessage}); !errors.Is(err, ErrUnhandledMessage) {
-		t.Fatalf("error handler error = %v, want %v", err, ErrUnhandledMessage)
+	if cfg.errorObserver != nil {
+		t.Fatal("nil error observer option overwrote default observer")
 	}
 
-	if cfg.retryPolicy.MaxAttempts != 3 {
-		t.Fatalf("retry max attempts = %d, want 3", cfg.retryPolicy.MaxAttempts)
+	if cfg.retryTopicResolver != nil {
+		t.Fatal("retry topic resolver default = non-nil, want nil")
 	}
-	if !cfg.retryPolicy.Retryable(Error{Stage: StageHandle, Err: ErrUnhandledMessage}) {
-		t.Fatal("retry policy returned false for handle stage, want true")
+	if cfg.dlqTopicResolver != nil {
+		t.Fatal("DLQ topic resolver default = non-nil, want nil")
 	}
-
-	if !cfg.dlqEnabled {
-		t.Fatal("DLQ enabled = false, want true")
+	if cfg.failureFallback != FailurePublishFallbackStop {
+		t.Fatalf("failure fallback = %v, want %v", cfg.failureFallback, FailurePublishFallbackStop)
+	}
+	if cfg.publishRetry.maxAttempts != 1 {
+		t.Fatalf("publish retry max attempts = %d, want 1", cfg.publishRetry.maxAttempts)
 	}
 	if cfg.headerNames != defaultHeaders {
 		t.Fatalf("header names = %#v, want %#v", cfg.headerNames, defaultHeaders)
 	}
 	if cfg.closeClient != defaultCloseClient {
 		t.Fatalf("closeClient = %v, want %v", cfg.closeClient, defaultCloseClient)
+	}
+}
+
+// Intent: retry and DLQ topic naming is opt-in so consumers cannot silently depend on undeclared Kafka topics.
+func TestWithDefaultFailureTopics(t *testing.T) {
+	cfg := defaultConfig()
+	WithDefaultFailureTopics()(&cfg)
+
+	retryTopic, err := cfg.retryTopicResolver(Error{Record: &kgo.Record{Topic: "orders"}})
+	if err != nil {
+		t.Fatalf("retry topic resolver returned error: %v", err)
+	}
+	if retryTopic != "orders.retry" {
+		t.Fatalf("retry topic = %q, want orders.retry", retryTopic)
+	}
+
+	dlqTopic, err := cfg.dlqTopicResolver(Error{Record: &kgo.Record{Topic: "orders"}})
+	if err != nil {
+		t.Fatalf("DLQ topic resolver returned error: %v", err)
+	}
+	if dlqTopic != "orders.dlq" {
+		t.Fatalf("DLQ topic = %q, want orders.dlq", dlqTopic)
 	}
 }
 

@@ -1,7 +1,7 @@
 ---
-last_updated: 2026-05-10
+last_updated: 2026-06-01
 updated_by: superpowers-memory:update
-triggered_by_plan: 2026-05-10-kafka-message-implementation.md
+triggered_by_plan: 2026-06-01-kafka-explicit-failure-policy
 ---
 
 # Conventions
@@ -25,8 +25,12 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 - Kafka message providers reserve `jimu-message-id`, `jimu-message-kind`, `jimu-message-occurred-at`, and retry/DLQ `jimu-*` failure headers; caller headers must not override adapter metadata.
 - `Message.Key()` maps to the Kafka record key; message IDs stay in reserved headers.
 - Consuming protobuf payloads requires a `PayloadResolver`; publishing does not require one.
-- Default Kafka retry/DLQ policy uses `<source-topic>.retry`, `<source-topic>.dlq`, and max attempts `3`.
-- With DLQ disabled, a custom `ErrorHandler` returning nil intentionally drops and commits the failed source record; the default handler returns the original error and leaves it uncommitted.
+- Kafka `NewConsumer` requires an explicit `FailurePolicy`; message-level failures from `Handler.Handle`, decode, or unhandled-kind routing do not stop `Run` by themselves.
+- `DropAndCommitPolicy` is the explicit ignore/default policy: observe the message-level failure, commit the source offset, and continue consumption.
+- Retry/DLQ topics are opt-in. Use `WithDefaultFailureTopics` for `<source-topic>.retry` and `<source-topic>.dlq`, or provide custom topic resolvers.
+- `WithErrorObserver` is observation only; it must not decide drop/retry/DLQ/stop control flow.
+- Runtime-level failures such as poll failure without records, retry/DLQ publish failure with stop fallback, and offset commit failure may still return from `Run`.
+- Publisher `WithPublishRetry` handles transient `ProduceSync` failures; deterministic message-to-record mapping errors are returned before producing and are not retried.
 
 ## Testing
 

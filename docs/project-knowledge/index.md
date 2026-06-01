@@ -1,8 +1,8 @@
 ---
-last_updated: 2026-05-10
+last_updated: 2026-06-01
 updated_by: superpowers-memory:update
-covers_branch: release/message@d58b024
-triggered_by_plan: 2026-05-10-kafka-message-implementation.md
+covers_branch: codex/kafka-explicit-failure-policy
+triggered_by_plan: 2026-06-01-kafka-explicit-failure-policy
 ---
 
 # Project Knowledge Index
@@ -15,17 +15,17 @@ Key points: provider modules now include config, logger, and Kafka message adapt
 ## features.md
 
 Current capability map for implemented provider modules.
-Key points: config providers cover Apollo, etcd, Kubernetes, and Nacos; logging covers zap; messaging covers Kafka Publisher/Consumer for `ddd/message`.
+Key points: config providers cover Apollo, etcd, Kubernetes, and Nacos; logging covers zap; messaging covers Kafka Publisher/Consumer for `ddd/message`, with explicit consumer `FailurePolicy` and opt-in retry/DLQ topics.
 
 ## tech-stack.md
 
 Language, workspace, CI, and key SDK dependencies.
-Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; all provider modules use `components` v0.8.0 and CI avoids deprecated artifact actions.
+Key points: workspace/CI are on Go 1.25.x while root remains Go 1.21; provider modules use package-specific `components` versions, including `message/kafka` on v0.9.8; CI avoids deprecated artifact actions.
 
 ## conventions.md
 
 Project-specific layout, adapter, testing, messaging, and release conventions.
-Key points: new providers belong in `go.work` and release matrix; repository Codex config must not contain secrets; Kafka integration tests use the `integration` tag.
+Key points: new providers belong in `go.work` and release matrix; repository Codex config must not contain secrets; Kafka integration tests use the `integration` tag; Kafka message-level failures are governed by explicit policies, while runtime failures surface through `Run`.
 
 ## decisions.md
 
@@ -35,4 +35,4 @@ Key points: no ADR-level decisions are recorded yet.
 ## glossary.md
 
 Short definitions for repository-specific terms.
-Key points: provider module, Config Source, Logger Adapter, Message Provider, PayloadResolver, and DLQ.
+Key points: provider module, Config Source, Logger Adapter, Message Provider, PayloadResolver, FailurePolicy, ErrorObserver, and DLQ.

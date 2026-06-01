@@ -21,12 +21,13 @@ type pollClient interface {
 }
 
 type Consumer struct {
-	client pollClient
-	cfg    config
-	router *message.Router
+	client        pollClient
+	failurePolicy FailurePolicy
+	cfg           config
+	router        *message.Router
 }
 
-func NewConsumer(client *kgo.Client, opts ...Option) *Consumer {
+func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Consumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		if opt != nil {
@@ -38,15 +39,19 @@ func NewConsumer(client *kgo.Client, opts ...Option) *Consumer {
 	if client != nil {
 		consumer = client
 	}
-	return newConsumer(consumer, cfg)
+	return newConsumer(consumer, policy, cfg)
 }
 
-func newConsumer(client pollClient, cfg config) *Consumer {
-	return &Consumer{
-		client: client,
-		cfg:    cfg,
-		router: message.NewRouter(),
+func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer, error) {
+	if policy == nil {
+		return nil, ErrNilFailurePolicy
 	}
+	return &Consumer{
+		client:        client,
+		failurePolicy: policy,
+		cfg:           cfg,
+		router:        message.NewRouter(),
+	}, nil
 }
 
 func (c *Consumer) Subscribe(handler message.Handler) error {
@@ -66,26 +71,33 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 	for {
 		fetches := c.client.PollFetches(ctx)
+		var pollErr error
 		for _, fetchErr := range fetches.Errors() {
 			err := fetchErr.Err
-			if handlerErr := c.cfg.errorHandler(ctx, Error{
+			c.observe(ctx, Error{
 				Stage: StagePoll,
 				Err:   err,
-			}); handlerErr != nil {
-				return handlerErr
-			}
+			})
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
+			if pollErr == nil {
+				pollErr = err
+			}
 		}
 
+		processed := 0
 		for iter := fetches.RecordIter(); !iter.Done(); {
+			processed++
 			if err := c.processRecord(ctx, iter.Next()); err != nil {
 				return err
 			}
+		}
+		if pollErr != nil && processed == 0 {
+			return pollErr
 		}
 	}
 }
@@ -121,79 +133,67 @@ func (c *Consumer) processRecord(ctx context.Context, record *kgo.Record) error 
 }
 
 func (c *Consumer) handleFailure(ctx context.Context, failure Error) error {
-	decision := failureAction(failure, c.cfg)
+	c.observe(ctx, failure)
+	decision := failureAction(ctx, failure, c.failurePolicy, c.cfg)
 	if decision.err != nil {
-		handlerErr := c.cfg.errorHandler(ctx, Error{
-			Stage:   failure.Stage,
-			Record:  failure.Record,
-			Message: failure.Message,
-			Err:     decision.err,
-		})
-		if handlerErr != nil {
-			return handlerErr
-		}
-		return decision.err
+		return c.handleFailurePipelineError(ctx, failure, decision.action, decision.err)
 	}
 
-	if decision.kind == actionNone {
-		if err := c.cfg.errorHandler(ctx, failure); err != nil {
-			return err
-		}
+	if decision.action == FailureActionDrop {
 		return c.commit(ctx, failure.Record)
 	}
 
 	failureRecord := buildFailureRecord(failure, decision, c.cfg)
 	if failureRecord == nil {
 		err := fmt.Errorf("build failure record: %w", ErrNoTopic)
-		if handlerErr := c.cfg.errorHandler(ctx, Error{
-			Stage:   failure.Stage,
-			Record:  failure.Record,
-			Message: failure.Message,
-			Err:     err,
-		}); handlerErr != nil {
-			return handlerErr
-		}
-		return err
+		return c.handleFailurePipelineError(ctx, failure, decision.action, err)
 	}
 
 	if err := c.client.ProduceSync(ctx, failureRecord).FirstErr(); err != nil {
-		stage, wrappedErr := publishFailure(decision.kind, err)
-		handlerErr := c.cfg.errorHandler(ctx, Error{
-			Stage:   stage,
-			Record:  failure.Record,
-			Message: failure.Message,
-			Err:     wrappedErr,
-		})
-		if handlerErr != nil {
-			return handlerErr
-		}
-		return wrappedErr
+		return c.handleFailurePipelineError(ctx, failure, decision.action, err)
 	}
 
 	return c.commit(ctx, failure.Record)
 }
 
+func (c *Consumer) handleFailurePipelineError(ctx context.Context, failure Error, action FailureAction, err error) error {
+	stage, wrappedErr := publishFailure(action, err)
+	c.observe(ctx, Error{
+		Stage:   stage,
+		Record:  failure.Record,
+		Message: failure.Message,
+		Err:     wrappedErr,
+	})
+	if c.cfg.failureFallback == FailurePublishFallbackDrop {
+		return c.commit(ctx, failure.Record)
+	}
+	return wrappedErr
+}
+
 func (c *Consumer) commit(ctx context.Context, record *kgo.Record) error {
 	if err := c.client.CommitRecords(ctx, record); err != nil {
 		wrappedErr := fmt.Errorf("%w: %w", ErrCommitFailed, err)
-		handlerErr := c.cfg.errorHandler(ctx, Error{
+		c.observe(ctx, Error{
 			Stage:  StageCommit,
 			Record: record,
 			Err:    wrappedErr,
 		})
-		if handlerErr != nil {
-			return handlerErr
-		}
 		return wrappedErr
 	}
 	return nil
 }
 
-func publishFailure(kind failureActionKind, err error) (Stage, error) {
-	switch kind {
-	case actionRetry:
+func (c *Consumer) observe(ctx context.Context, failure Error) {
+	if c.cfg.errorObserver != nil {
+		c.cfg.errorObserver(ctx, failure)
+	}
+}
+
+func publishFailure(action FailureAction, err error) (Stage, error) {
+	switch action {
+	case FailureActionRetry:
 		return StageRetryPublish, fmt.Errorf("%w: %w", ErrRetryPublishFailed, err)
-	case actionDLQ:
+	case FailureActionDLQ:
 		return StageDLQPublish, fmt.Errorf("%w: %w", ErrDLQPublishFailed, err)
 	default:
 		return StageHandle, err

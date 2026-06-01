@@ -1,28 +1,30 @@
 package kafka
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Intent: handler failures below the max attempt boundary should be retried on the retry topic.
+// Intent: handler failures below the max attempt boundary should be retried on an explicitly configured retry topic.
 func TestFailureActionRetriesHandleErrorBelowMaxAttempts(t *testing.T) {
 	cfg := defaultConfig()
+	WithDefaultFailureTopics()(&cfg)
 	failure := Error{
 		Stage:  StageHandle,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("handler failed"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 
 	if decision.err != nil {
 		t.Fatalf("failureAction returned error: %v", decision.err)
 	}
-	if decision.kind != actionRetry {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionRetry)
+	if decision.action != FailureActionRetry {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionRetry)
 	}
 	if decision.attempt != 1 {
 		t.Fatalf("attempt = %d, want 1", decision.attempt)
@@ -35,6 +37,7 @@ func TestFailureActionRetriesHandleErrorBelowMaxAttempts(t *testing.T) {
 // Intent: reaching the max attempt boundary should stop retrying and route the failure to DLQ.
 func TestFailureActionDLQAtMaxAttempts(t *testing.T) {
 	cfg := defaultConfig()
+	WithDefaultFailureTopics()(&cfg)
 	failure := Error{
 		Stage: StageHandle,
 		Record: &kgo.Record{
@@ -44,13 +47,13 @@ func TestFailureActionDLQAtMaxAttempts(t *testing.T) {
 		Err: errors.New("handler failed again"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 
 	if decision.err != nil {
 		t.Fatalf("failureAction returned error: %v", decision.err)
 	}
-	if decision.kind != actionDLQ {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionDLQ)
+	if decision.action != FailureActionDLQ {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionDLQ)
 	}
 	if decision.attempt != 3 {
 		t.Fatalf("attempt = %d, want 3", decision.attempt)
@@ -63,19 +66,20 @@ func TestFailureActionDLQAtMaxAttempts(t *testing.T) {
 // Intent: decode failures should not be retried because the raw record cannot be converted into a handler message.
 func TestFailureActionDLQDecodeError(t *testing.T) {
 	cfg := defaultConfig()
+	WithDefaultFailureTopics()(&cfg)
 	failure := Error{
 		Stage:  StageDecode,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("decode failed"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 
 	if decision.err != nil {
 		t.Fatalf("failureAction returned error: %v", decision.err)
 	}
-	if decision.kind != actionDLQ {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionDLQ)
+	if decision.action != FailureActionDLQ {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionDLQ)
 	}
 	if decision.attempt != 1 {
 		t.Fatalf("attempt = %d, want 1", decision.attempt)
@@ -85,24 +89,46 @@ func TestFailureActionDLQDecodeError(t *testing.T) {
 	}
 }
 
-// Intent: explicitly disabling DLQ should drop non-retryable failures instead of producing a DLQ record.
-func TestFailureActionDLQDisabled(t *testing.T) {
+// Intent: retry and DLQ output topics are explicit; policies that request them fail clearly without resolvers.
+func TestFailureActionRequiresExplicitFailureTopics(t *testing.T) {
 	cfg := defaultConfig()
-	WithDLQDisabled()(&cfg)
+	failure := Error{
+		Stage:  StageHandle,
+		Record: &kgo.Record{Topic: "orders"},
+		Err:    errors.New("handler failed"),
+	}
+
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
+	record := buildFailureRecord(failure, decision, cfg)
+
+	if !errors.Is(decision.err, ErrNoTopic) {
+		t.Fatalf("decision error = %v, want %v", decision.err, ErrNoTopic)
+	}
+	if decision.action != FailureActionRetry {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionRetry)
+	}
+	if record != nil {
+		t.Fatalf("buildFailureRecord = %#v, want nil", record)
+	}
+}
+
+// Intent: drop policies should not require retry/DLQ topic configuration or produce a failure record.
+func TestFailureActionDropBuildsNoRecord(t *testing.T) {
+	cfg := defaultConfig()
 	failure := Error{
 		Stage:  StageDecode,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("decode failed"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, DropAndCommitPolicy(), cfg)
 	record := buildFailureRecord(failure, decision, cfg)
 
 	if decision.err != nil {
 		t.Fatalf("failureAction returned error: %v", decision.err)
 	}
-	if decision.kind != actionNone {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionNone)
+	if decision.action != FailureActionDrop {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionDrop)
 	}
 	if record != nil {
 		t.Fatalf("buildFailureRecord = %#v, want nil", record)
@@ -114,14 +140,14 @@ func TestFailureActionReportsNilRecord(t *testing.T) {
 	cfg := defaultConfig()
 	failure := Error{Stage: StageHandle, Err: errors.New("handler failed")}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	record := buildFailureRecord(failure, decision, cfg)
 
 	if !errors.Is(decision.err, ErrNilRecord) {
 		t.Fatalf("decision error = %v, want %v", decision.err, ErrNilRecord)
 	}
-	if decision.kind != actionNone {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionNone)
+	if decision.action != FailureActionDrop {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionDrop)
 	}
 	if record != nil {
 		t.Fatalf("buildFailureRecord = %#v, want nil", record)
@@ -137,14 +163,14 @@ func TestFailureActionReportsEmptyTopic(t *testing.T) {
 		Err:    errors.New("handler failed"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	record := buildFailureRecord(failure, decision, cfg)
 
 	if !errors.Is(decision.err, ErrNoTopic) {
 		t.Fatalf("decision error = %v, want %v", decision.err, ErrNoTopic)
 	}
-	if decision.kind != actionNone {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionNone)
+	if decision.action != FailureActionDrop {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionDrop)
 	}
 	if record != nil {
 		t.Fatalf("buildFailureRecord = %#v, want nil", record)
@@ -167,7 +193,7 @@ func TestBuildFailureRecordPreservesRawRecord(t *testing.T) {
 		Record: source,
 		Err:    errors.New("handler failed"),
 	}
-	decision := failureDecision{kind: actionRetry, topic: "orders.retry", attempt: 1}
+	decision := failureDecision{action: FailureActionRetry, topic: "orders.retry", attempt: 1}
 
 	record := buildFailureRecord(failure, decision, cfg)
 
@@ -218,7 +244,7 @@ func TestBuildFailureRecordRejectsDecisionError(t *testing.T) {
 		Err:    errors.New("handler failed"),
 	}
 	decision := failureDecision{
-		kind:    actionRetry,
+		action:  FailureActionRetry,
 		topic:   "orders.retry",
 		attempt: 1,
 		err:     errors.New("resolve retry topic"),
@@ -239,7 +265,7 @@ func TestBuildFailureRecordRejectsEmptyTopic(t *testing.T) {
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("handler failed"),
 	}
-	decision := failureDecision{kind: actionRetry, attempt: 1}
+	decision := failureDecision{action: FailureActionRetry, attempt: 1}
 
 	record := buildFailureRecord(failure, decision, cfg)
 
@@ -263,7 +289,7 @@ func TestBuildFailureRecordPreservesFirstErrorAndUpdatesLastError(t *testing.T) 
 		Record: source,
 		Err:    errors.New("new last failure"),
 	}
-	decision := failureDecision{kind: actionDLQ, topic: "orders.dlq", attempt: 2}
+	decision := failureDecision{action: FailureActionDLQ, topic: "orders.dlq", attempt: 2}
 
 	record := buildFailureRecord(failure, decision, cfg)
 
@@ -291,16 +317,17 @@ func TestFailureActionUsesCustomTopicResolvers(t *testing.T) {
 		return failure.Record.Topic + "-dlq-custom", nil
 	})(&cfg)
 
-	retryDecision := failureAction(Error{
+	policy := RetryThenDLQPolicy(RetryThenDLQConfig{})
+	retryDecision := failureAction(context.Background(), Error{
 		Stage:  StageHandle,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("handler failed"),
-	}, cfg)
-	dlqDecision := failureAction(Error{
+	}, policy, cfg)
+	dlqDecision := failureAction(context.Background(), Error{
 		Stage:  StageDecode,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("decode failed"),
-	}, cfg)
+	}, policy, cfg)
 
 	if retryDecision.err != nil {
 		t.Fatalf("retry failureAction returned error: %v", retryDecision.err)
@@ -329,48 +356,49 @@ func TestFailureActionReportsResolverError(t *testing.T) {
 		Err:    errors.New("handler failed"),
 	}
 
-	decision := failureAction(failure, cfg)
+	decision := failureAction(context.Background(), failure, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	record := buildFailureRecord(failure, decision, cfg)
 
 	if !errors.Is(decision.err, resolveErr) {
 		t.Fatalf("decision error = %v, want %v", decision.err, resolveErr)
 	}
-	if decision.kind != actionRetry {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionRetry)
+	if decision.action != FailureActionRetry {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionRetry)
 	}
 	if record != nil {
 		t.Fatalf("buildFailureRecord = %#v, want nil", record)
 	}
 }
 
-// Intent: zero-valued retry policy options should not erase the default max attempts or retryable-stage behavior.
-func TestRetryPolicyOptionsPreserveDefaultsForZeroValues(t *testing.T) {
+// Intent: zero-valued RetryThenDLQPolicy config should preserve max-attempt and retryable-stage defaults.
+func TestRetryThenDLQPolicyZeroValuesPreserveDefaults(t *testing.T) {
 	cfg := defaultConfig()
-	WithRetryPolicy(RetryPolicy{})(&cfg)
+	WithDefaultFailureTopics()(&cfg)
+	policy := RetryThenDLQPolicy(RetryThenDLQConfig{})
 
-	decision := failureAction(Error{
+	decision := failureAction(context.Background(), Error{
 		Stage:  StageHandle,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("handler failed"),
-	}, cfg)
+	}, policy, cfg)
 
 	if decision.err != nil {
 		t.Fatalf("failureAction returned error: %v", decision.err)
 	}
-	if decision.kind != actionRetry {
-		t.Fatalf("decision kind = %v, want %v", decision.kind, actionRetry)
+	if decision.action != FailureActionRetry {
+		t.Fatalf("decision action = %v, want %v", decision.action, FailureActionRetry)
 	}
 	if decision.attempt != 1 {
 		t.Fatalf("attempt = %d, want 1", decision.attempt)
 	}
 
-	dlqDecision := failureAction(Error{
+	dlqDecision := failureAction(context.Background(), Error{
 		Stage:  StageDecode,
 		Record: &kgo.Record{Topic: "orders"},
 		Err:    errors.New("decode failed"),
-	}, cfg)
-	if dlqDecision.kind != actionDLQ {
-		t.Fatalf("default DLQ decision kind = %v, want %v", dlqDecision.kind, actionDLQ)
+	}, policy, cfg)
+	if dlqDecision.action != FailureActionDLQ {
+		t.Fatalf("default DLQ decision action = %v, want %v", dlqDecision.action, FailureActionDLQ)
 	}
 }
 

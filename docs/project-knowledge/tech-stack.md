@@ -1,7 +1,7 @@
 ---
-last_updated: 2026-05-10
+last_updated: 2026-06-01
 updated_by: superpowers-memory:update
-triggered_by_plan: 2026-05-10-kafka-message-implementation.md
+triggered_by_plan: 2026-06-01-kafka-explicit-failure-policy
 ---
 
 # Tech Stack
@@ -20,7 +20,7 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 
 | Dependency | Version / Source | Purpose | Why Chosen |
 | --- | --- | --- | --- |
-| `github.com/go-jimu/components` | v0.8.0 in all provider modules | Shared component interfaces | Defines the contracts this repo implements. |
+| `github.com/go-jimu/components` | Provider-specific module versions; `message/kafka` uses v0.9.8 | Shared component interfaces | Defines the contracts this repo implements. |
 | `github.com/apolloconfig/agollo/v4` | v4.4.0 | Apollo SDK | Native Apollo client for Go. |
 | `go.etcd.io/etcd/client/v3` | v3.5.14 | etcd SDK | Official etcd v3 client. |
 | `k8s.io/client-go` | v0.30.2 | Kubernetes client | Standard Go client for ConfigMaps. |
