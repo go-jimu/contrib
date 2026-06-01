@@ -48,7 +48,26 @@ func (p *publisher) Publish(ctx context.Context, msg message.Message) error {
 		return err
 	}
 
-	return p.client.ProduceSync(ctx, record).FirstErr()
+	attempts := p.cfg.publishRetry.maxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var publishErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		publishErr = p.client.ProduceSync(ctx, record).FirstErr()
+		if publishErr == nil {
+			return nil
+		}
+		if attempt == attempts {
+			break
+		}
+		if p.cfg.publishRetry.backoff != nil && p.cfg.publishRetry.sleep != nil {
+			if err := p.cfg.publishRetry.sleep(ctx, p.cfg.publishRetry.backoff(attempt)); err != nil {
+				return err
+			}
+		}
+	}
+	return publishErr
 }
 
 func NewClient(opts ...kgo.Opt) (*kgo.Client, error) {

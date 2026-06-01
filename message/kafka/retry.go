@@ -1,48 +1,43 @@
 package kafka
 
-import "github.com/twmb/franz-go/pkg/kgo"
+import (
+	"context"
 
-type failureActionKind int
-
-const (
-	actionNone failureActionKind = iota
-	actionRetry
-	actionDLQ
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 type failureDecision struct {
-	kind    failureActionKind
+	action  FailureAction
 	topic   string
 	attempt int
 	err     error
 }
 
-func failureAction(failure Error, cfg config) failureDecision {
+func failureAction(ctx context.Context, failure Error, policy FailurePolicy, cfg config) failureDecision {
 	if failure.Record == nil {
-		return failureDecision{kind: actionNone, err: ErrNilRecord}
+		return failureDecision{action: FailureActionDrop, err: ErrNilRecord}
 	}
 	if failure.Record.Topic == "" {
-		return failureDecision{kind: actionNone, err: ErrNoTopic}
+		return failureDecision{action: FailureActionDrop, err: ErrNoTopic}
 	}
 
 	current := retryAttempt(failure.Record.Headers)
 	next := current + 1
-	retryPolicy := normalizedRetryPolicy(cfg.retryPolicy)
-
-	if retryPolicy.Retryable(failure) && next < retryPolicy.MaxAttempts {
+	action := policy.Decide(ctx, failure)
+	switch action {
+	case FailureActionRetry:
 		topic, err := resolveFailureTopic(cfg.retryTopicResolver, failure)
-		return failureDecision{kind: actionRetry, topic: topic, attempt: next, err: err}
+		return failureDecision{action: action, topic: topic, attempt: next, err: err}
+	case FailureActionDLQ:
+		topic, err := resolveFailureTopic(cfg.dlqTopicResolver, failure)
+		return failureDecision{action: action, topic: topic, attempt: next, err: err}
+	default:
+		return failureDecision{action: FailureActionDrop, attempt: next}
 	}
-
-	if !cfg.dlqEnabled {
-		return failureDecision{kind: actionNone, attempt: next}
-	}
-	topic, err := resolveFailureTopic(cfg.dlqTopicResolver, failure)
-	return failureDecision{kind: actionDLQ, topic: topic, attempt: next, err: err}
 }
 
 func buildFailureRecord(failure Error, decision failureDecision, cfg config) *kgo.Record {
-	if decision.err != nil || decision.kind == actionNone || decision.topic == "" || failure.Record == nil {
+	if decision.err != nil || decision.action == FailureActionDrop || decision.topic == "" || failure.Record == nil {
 		return nil
 	}
 
@@ -50,17 +45,6 @@ func buildFailureRecord(failure Error, decision failureDecision, cfg config) *kg
 	record.Topic = decision.topic
 	addFailureHeaders(record, cfg, failure, decision.attempt)
 	return record
-}
-
-func normalizedRetryPolicy(policy RetryPolicy) RetryPolicy {
-	defaults := defaultRetryPolicy()
-	if policy.MaxAttempts <= 0 {
-		policy.MaxAttempts = defaults.MaxAttempts
-	}
-	if policy.Retryable == nil {
-		policy.Retryable = defaults.Retryable
-	}
-	return policy
 }
 
 func resolveFailureTopic(resolver FailureTopicResolver, failure Error) (string, error) {

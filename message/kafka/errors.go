@@ -35,6 +35,7 @@ var (
 	ErrNoKind             = errors.New("message kind is empty")
 	ErrNoPayloadResolver  = errors.New("payload resolver is not configured")
 	ErrUnhandledMessage   = errors.New("message is unhandled")
+	ErrNilFailurePolicy   = errors.New("kafka failure policy is nil")
 	ErrRetryPublishFailed = errors.New("retry publish failed")
 	ErrDLQPublishFailed   = errors.New("dlq publish failed")
 	ErrCommitFailed       = errors.New("commit failed")

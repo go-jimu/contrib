@@ -12,13 +12,19 @@ import (
 type fakeProducerClient struct {
 	records []*kgo.Record
 	err     error
+	errs    []error
 }
 
 func (f *fakeProducerClient) ProduceSync(_ context.Context, records ...*kgo.Record) kgo.ProduceResults {
 	f.records = append(f.records, records...)
+	err := f.err
+	if len(f.errs) > 0 {
+		err = f.errs[0]
+		f.errs = f.errs[1:]
+	}
 	results := make(kgo.ProduceResults, len(records))
 	for i, record := range records {
-		results[i] = kgo.ProduceResult{Record: record, Err: f.err}
+		results[i] = kgo.ProduceResult{Record: record, Err: err}
 	}
 	return results
 }
@@ -101,5 +107,43 @@ func TestPublisherPublishAppliesTopicResolverOption(t *testing.T) {
 	}
 	if client.records[0].Topic != "payments" {
 		t.Fatalf("topic = %q, want payments", client.records[0].Topic)
+	}
+}
+
+// Intent: publisher retry should handle transient Kafka produce failures inside the adapter instead of forcing each application to wrap the publisher.
+func TestPublisherPublishRetriesProduceFailures(t *testing.T) {
+	produceErr := errors.New("produce failed")
+	client := &fakeProducerClient{errs: []error{produceErr, nil}}
+	cfg := defaultConfig()
+	WithPublishRetry(2, nil)(&cfg)
+	publisher := newPublisher(client, cfg)
+
+	err := publisher.Publish(context.Background(), newTestMessage(t, "order.payment.v1.OrderPaid"))
+
+	if err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if len(client.records) != 2 {
+		t.Fatalf("produce attempts = %d, want 2", len(client.records))
+	}
+}
+
+// Intent: publisher retry should not retry deterministic local mapping failures such as missing topics.
+func TestPublisherPublishDoesNotRetryRecordMappingError(t *testing.T) {
+	client := &fakeProducerClient{}
+	cfg := defaultConfig()
+	WithTopicResolver(func(message.Message) (string, error) {
+		return "", ErrNoTopic
+	})(&cfg)
+	WithPublishRetry(3, nil)(&cfg)
+	publisher := newPublisher(client, cfg)
+
+	err := publisher.Publish(context.Background(), newTestMessage(t, "order.payment.v1.OrderPaid"))
+
+	if !errors.Is(err, ErrNoTopic) {
+		t.Fatalf("Publish error = %v, want %v", err, ErrNoTopic)
+	}
+	if len(client.records) != 0 {
+		t.Fatalf("produce attempts = %d, want 0", len(client.records))
 	}
 }

@@ -138,7 +138,10 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 	topic := uniqueIntegrationName("orders-paid")
 	group := uniqueIntegrationName("orders-paid-group")
 	client := newIntegrationClient(t, brokers, group, topic)
-	consumer := NewConsumer(client, WithPayloadResolverFunc(integrationPayloadResolver))
+	consumer, err := NewConsumer(client, DropAndCommitPolicy(), WithPayloadResolverFunc(integrationPayloadResolver))
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
 	publisher := NewPublisher(client)
 
 	received := make(chan message.Message, 1)
@@ -204,7 +207,15 @@ func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
 	retryGroup := uniqueIntegrationName("orders-retry-group")
 	sourceClient := newIntegrationClient(t, brokers, sourceGroup, sourceTopic)
 	retryClient := newIntegrationClient(t, brokers, retryGroup, retryTopic)
-	consumer := NewConsumer(sourceClient, WithPayloadResolverFunc(integrationPayloadResolver))
+	consumer, err := NewConsumer(
+		sourceClient,
+		RetryThenDLQPolicy(RetryThenDLQConfig{}),
+		WithPayloadResolverFunc(integrationPayloadResolver),
+		WithDefaultFailureTopics(),
+	)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
 	publisher := NewPublisher(sourceClient)
 
 	handlerErr := errors.New("handler failed")

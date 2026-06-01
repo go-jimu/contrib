@@ -22,7 +22,7 @@ go get github.com/go-jimu/contrib/message/kafka@latest
 2. For publishing, create a `message.Message` and call `NewPublisher(client).Publish`.
 3. For consuming, configure `kgo.ConsumerGroup`, `kgo.ConsumeTopics`, and `kgo.DisableAutoCommit()`.
 4. Register protobuf payload factories with `message.NewPayloadRegistry`.
-5. Create `NewConsumer(client, kafka.WithPayloadResolver(registry))`.
+5. Create `NewConsumer(client, failurePolicy, kafka.WithPayloadResolver(registry))`.
 6. Subscribe `message.Handler` values and call `consumer.Run(ctx)`.
 
 ## Message Mapping
@@ -133,10 +133,14 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	consumer := kafka.NewConsumer(
+	consumer, err := kafka.NewConsumer(
 		client,
+		kafka.DropAndCommitPolicy(),
 		kafka.WithPayloadResolver(registry),
 	)
+	if err != nil {
+		return err
+	}
 
 	if err := consumer.Subscribe(paidHandler{}); err != nil {
 		return err
@@ -156,45 +160,86 @@ The `encoding/testdata` type in the example is only a placeholder; real
 projects should replace it with their own generated protobuf message type.
 
 Consumers must configure `kgo.DisableAutoCommit()`. The provider commits
-offsets manually after the handler succeeds, retry publishing succeeds, DLQ
-publishing succeeds, or a DLQ-disabled failure is explicitly dropped by a custom
-error handler. If franz-go auto commit is enabled, it can commit offsets outside
-the provider's commit semantics.
+offsets manually after the handler succeeds, a configured message-level failure
+action completes, or an explicit drop policy chooses to commit the failed source.
+If franz-go auto commit is enabled, it can commit offsets outside the provider's
+commit semantics.
 
-`message.Handler.Handle` controls acknowledgement indirectly:
+`message.Handler.Handle` errors are message-level failures. They do not stop
+`Run` by themselves. The required `FailurePolicy` decides whether the failed
+source record is dropped, retried, or published to DLQ. `Consumer.Run` returns
+only when the runtime cannot continue, the context is canceled, commit fails, or
+failure publishing fails with the stop fallback.
 
 - return `nil` when processing is complete and the source offset may be committed;
-- return an error when the provider should apply retry, DLQ, redelivery, or stop
-  behavior;
+- return an error when the provider should apply the configured failure policy;
 - handle business failures inside the handler and return `nil` when redelivery
   is not desired.
 
 ## Retry And DLQ
 
-By default, handler and unhandled-kind failures are retried on
-`<source-topic>.retry`. When attempts are exhausted, or when the failure is not
-retryable, the source record is published to `<source-topic>.dlq`. The default
-maximum attempt count is `3`.
+Retry and DLQ are disabled until the caller configures both a policy and failure
+topics. This avoids silently depending on undeclared Kafka topics such as
+`<source-topic>.retry` or `<source-topic>.dlq`.
+
+Use `RetryThenDLQPolicy` with explicit topic resolvers:
+
+```go
+consumer, err := kafka.NewConsumer(
+	client,
+	kafka.RetryThenDLQPolicy(kafka.RetryThenDLQConfig{
+		MaxAttempts: 3,
+	}),
+	kafka.WithPayloadResolver(registry),
+	kafka.WithDefaultFailureTopics(),
+)
+```
+
+`WithDefaultFailureTopics` routes retry records to `<source-topic>.retry` and
+DLQ records to `<source-topic>.dlq`. You can replace that naming with
+`WithRetryTopicResolver` and `WithDLQTopicResolver`. When consuming records from
+a retry topic, the default resolvers prefer the original-topic metadata header,
+so a later retry uses `orders.retry` instead of `orders.retry.retry`.
+The provider does not create or validate failure topics; provision them in Kafka
+or enable auto topic creation explicitly. If a configured retry/DLQ publish
+fails, the default fallback stops `Run` and leaves the source offset uncommitted.
+
+The built-in policies are:
+
+| Policy | Behavior |
+| --- | --- |
+| `DropAndCommitPolicy` | Drop every message-level failure and commit the source offset. |
+| `DLQPolicy` | Publish every message-level failure to DLQ. |
+| `RetryThenDLQPolicy` | Retry handler failures until the attempt limit, then DLQ; decode and unhandled-kind failures go directly to DLQ. |
 
 The source offset is committed only after one of these outcomes:
 
 - the handler returns `nil`;
+- the policy drops the message-level failure;
 - publishing the retry record succeeds;
 - publishing the DLQ record succeeds.
 
 If retry or DLQ publishing fails, the source offset is not committed, allowing
 Kafka to redeliver the source record according to the consumer group behavior.
+Use `WithFailurePublishFallback(FailurePublishFallbackDrop)` only when losing
+the original failed record is an intentional tradeoff.
 
-Retry behavior can be customized with `kafka.WithRetryPolicy`,
-`kafka.WithRetryTopicResolver`, `kafka.WithDLQTopicResolver`, and
-`kafka.WithDLQDisabled`.
+## Publisher Retry
 
-With `kafka.WithDLQDisabled`, the provider does not produce a DLQ record.
-Non-retryable or exhausted failures are passed to the configured `ErrorHandler`.
-The source offset is committed only when a custom `ErrorHandler` returns `nil`,
-which means the caller intentionally chose to drop the record and continue. The
-default `ErrorHandler` returns the original error, so the default DLQ-disabled
-behavior does not drop-and-commit; the source remains uncommitted.
+`NewPublisher` does one produce attempt by default. Use `WithPublishRetry` to
+retry transient `ProduceSync` failures inside the adapter:
+
+```go
+publisher := kafka.NewPublisher(
+	client,
+	kafka.WithPublishRetry(3, func(attempt int) time.Duration {
+		return time.Duration(attempt) * 100 * time.Millisecond
+	}),
+)
+```
+
+Message-to-record mapping errors, such as an empty topic, are returned before
+producing and are not retried.
 
 ## Defaults
 
@@ -205,10 +250,11 @@ behavior does not drop-and-commit; the source remains uncommitted.
 | Kind resolver | reserved Kafka message-kind header |
 | Payload resolver | unset; consuming requires `WithPayloadResolver` |
 | Reserved headers | `jimu-message-id`, `jimu-message-kind`, `jimu-message-occurred-at` |
-| Retry attempts | `3` |
-| Retry topic | `<source-topic>.retry` |
-| DLQ topic | `<source-topic>.dlq` |
-| DLQ | enabled |
+| Consumer failure policy | required constructor argument |
+| Retry topic | disabled until `WithDefaultFailureTopics` or `WithRetryTopicResolver` |
+| DLQ topic | disabled until `WithDefaultFailureTopics` or `WithDLQTopicResolver` |
+| Failure publish fallback | stop `Run` and leave the source offset uncommitted |
+| Publisher retry | one produce attempt |
 | Client ownership | caller-owned; `Consumer.Close` closes the client only with `WithCloseClient(true)` |
 
 ## Options
@@ -220,21 +266,25 @@ behavior does not drop-and-commit; the source remains uncommitted.
 | `WithKindResolver` | Derive `message.Kind` from a consumed Kafka record. |
 | `WithPayloadResolver` | Configure the upstream `message.PayloadResolver` used for decode. |
 | `WithPayloadResolverFunc` | Convenience wrapper for function-based payload resolvers. |
-| `WithRetryPolicy` | Change max attempts or retryable failure stages. |
+| `WithDefaultFailureTopics` | Enable `<source-topic>.retry` and `<source-topic>.dlq` topic naming. |
 | `WithRetryTopicResolver` | Change retry topic selection. |
 | `WithDLQTopicResolver` | Change DLQ topic selection. |
-| `WithDLQDisabled` | Disable DLQ publishing and delegate final failure handling to `ErrorHandler`. |
-| `WithErrorHandler` | Observe or override failure handling decisions. |
+| `WithFailurePublishFallback` | Choose whether retry/DLQ publish failure stops `Run` or drops and commits the source. |
+| `WithPublishRetry` | Retry transient publisher `ProduceSync` failures. |
+| `WithErrorObserver` | Observe provider failures without controlling consumer flow. |
 | `WithCloseClient` | Let the provider close the franz-go client when `Consumer.Close` is called. |
 | `WithHeaderNames` | Override reserved metadata header names. |
+
+`WithRetryPolicy`, `WithDLQDisabled`, and `WithErrorHandler` are deprecated.
+Use `FailurePolicy`, explicit failure topic options, and `WithErrorObserver`.
 
 ## Error Surface
 
 Most provider errors wrap one of the package sentinel errors in `Error.Err` and
 include a `Stage` such as `decode`, `handle`, `retry_publish`, `dlq_publish`, or
-`commit`. Use `WithErrorHandler` to observe these failures and decide whether a
-run loop should continue, stop, drop, retry, or leave the source offset
-uncommitted.
+`commit`. Use `WithErrorObserver` to record these failures. Observer return
+values do not control flow; message-level decisions belong to `FailurePolicy`,
+and runtime-level failures are returned from `Consumer.Run`.
 
 Payload allocation errors come from the upstream `message.PayloadResolver`.
 For example, a resolver or registry factory returning nil is reported as

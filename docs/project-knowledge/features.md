@@ -1,7 +1,7 @@
 ---
-last_updated: 2026-05-10
+last_updated: 2026-06-01
 updated_by: superpowers-memory:update
-triggered_by_plan: 2026-05-10-kafka-message-implementation.md
+triggered_by_plan: 2026-06-01-kafka-explicit-failure-policy
 ---
 
 # Features
@@ -66,11 +66,11 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 
 #### Kafka Message Provider
 
-**Enables** — Consumer services can publish and consume `components/ddd/message` messages through Kafka while keeping topic, offset, retry, and DLQ concerns inside the provider.
+**Enables** — Consumer services can publish and consume `components/ddd/message` messages through Kafka while keeping topic, offset, failure policy, retry, and DLQ concerns inside the provider.
 
-**Actors / Entry Points** — Go applications import `github.com/go-jimu/contrib/message/kafka`, pass a franz-go client to `NewPublisher` or `NewConsumer`, and subscribe `message.Handler` implementations.
+**Actors / Entry Points** — Go applications import `github.com/go-jimu/contrib/message/kafka`, pass a franz-go client to `NewPublisher`, or pass a franz-go client plus an explicit `FailurePolicy` to `NewConsumer`, and subscribe `message.Handler` implementations.
 
-**Capability Boundary** — Covers protobuf payload encoding, payload resolution on consume, Kafka record key mapping from `Message.Key()`, reserved metadata headers, manual offset commit, retry topic handoff, and DLQ handoff; broker wiring is described in architecture.md §Scenario Sequences.
+**Capability Boundary** — Covers protobuf payload encoding, payload resolution on consume, Kafka record key mapping from `Message.Key()`, reserved metadata headers, manual offset commit, explicit drop/retry/DLQ decisions for message-level failures, retry topic handoff, DLQ handoff, and publisher produce retry; broker wiring is described in architecture.md §Scenario Sequences.
 
 **References** — `message/kafka/README.md`, `message/kafka/publisher.go`, `message/kafka/consumer.go`
 

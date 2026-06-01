@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -13,13 +14,34 @@ type KindResolver func(*kgo.Record) (message.Kind, error)
 
 // PayloadResolver is the upstream transport-neutral message payload resolver.
 type PayloadResolver = message.PayloadResolver
+
+// Deprecated: use ErrorObserver. ErrorHandler return values no longer control
+// message-level failure flow.
 type ErrorHandler func(context.Context, Error) error
+
+// ErrorObserver observes provider failures without controlling consumer flow.
+type ErrorObserver func(context.Context, Error)
+
+// FailureTopicResolver resolves the retry or DLQ topic for a failed source record.
 type FailureTopicResolver func(Error) (string, error)
 
+// Deprecated: use RetryThenDLQPolicy with NewConsumer.
 type RetryPolicy struct {
 	MaxAttempts int
 	Retryable   func(Error) bool
 }
+
+type FailurePublishFallback int
+
+const (
+	// FailurePublishFallbackStop returns the publish failure from Run and leaves the source offset uncommitted.
+	FailurePublishFallbackStop FailurePublishFallback = iota
+	// FailurePublishFallbackDrop commits the source offset when retry or DLQ publish fails.
+	FailurePublishFallbackDrop
+)
+
+// PublishBackoff returns the delay before the next publish retry attempt.
+type PublishBackoff func(attempt int) time.Duration
 
 type Option func(*config)
 
@@ -35,13 +57,19 @@ type config struct {
 	kindResolver        KindResolver
 	defaultKindResolver bool
 	payloadResolver     PayloadResolver
-	errorHandler        ErrorHandler
-	retryPolicy         RetryPolicy
-	dlqEnabled          bool
+	errorObserver       ErrorObserver
 	retryTopicResolver  FailureTopicResolver
 	dlqTopicResolver    FailureTopicResolver
+	failureFallback     FailurePublishFallback
+	publishRetry        publishRetryConfig
 	closeClient         bool
 	headerNames         HeaderNames
+}
+
+type publishRetryConfig struct {
+	maxAttempts int
+	backoff     PublishBackoff
+	sleep       func(context.Context, time.Duration) error
 }
 
 func defaultConfig() config {
@@ -51,11 +79,8 @@ func defaultConfig() config {
 		kindResolver:        defaultKindResolver(defaultHeaderNames()),
 		defaultKindResolver: true,
 		payloadResolver:     defaultPayloadResolver,
-		errorHandler:        defaultErrorHandler,
-		retryPolicy:         defaultRetryPolicy(),
-		dlqEnabled:          true,
-		retryTopicResolver:  defaultRetryTopicResolver,
-		dlqTopicResolver:    defaultDLQTopicResolver,
+		failureFallback:     FailurePublishFallbackStop,
+		publishRetry:        publishRetryConfig{maxAttempts: 1, sleep: sleepContext},
 		headerNames:         defaultHeaderNames(),
 	}
 }
@@ -96,37 +121,57 @@ var defaultPayloadResolver PayloadResolver = message.PayloadResolverFunc(func(me
 	return nil, ErrNoPayloadResolver
 })
 
-func defaultErrorHandler(_ context.Context, failure Error) error {
-	return failure.Err
-}
-
+// Deprecated: use RetryThenDLQPolicy with NewConsumer.
 func defaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		MaxAttempts: 3,
 		Retryable: func(failure Error) bool {
-			return failure.Stage == StageHandle || failure.Stage == StageUnhandled
+			return failure.Stage == StageHandle
 		},
 	}
 }
 
 func defaultRetryTopicResolver(failure Error) (string, error) {
-	if failure.Record == nil {
-		return "", ErrNilRecord
+	topic, err := sourceTopic(failure)
+	if err != nil {
+		return "", err
 	}
-	if failure.Record.Topic == "" {
-		return "", ErrNoTopic
-	}
-	return failure.Record.Topic + ".retry", nil
+	return topic + ".retry", nil
 }
 
 func defaultDLQTopicResolver(failure Error) (string, error) {
+	topic, err := sourceTopic(failure)
+	if err != nil {
+		return "", err
+	}
+	return topic + ".dlq", nil
+}
+
+func sourceTopic(failure Error) (string, error) {
 	if failure.Record == nil {
 		return "", ErrNilRecord
+	}
+	if topic := headerValue(failure.Record.Headers, headerOriginalTopic); topic != "" {
+		return topic, nil
 	}
 	if failure.Record.Topic == "" {
 		return "", ErrNoTopic
 	}
-	return failure.Record.Topic + ".dlq", nil
+	return failure.Record.Topic, nil
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func WithCodec(codec Codec) Option {
@@ -170,28 +215,40 @@ func WithPayloadResolverFunc(resolver func(message.Kind) (proto.Message, error))
 	return WithPayloadResolver(message.PayloadResolverFunc(resolver))
 }
 
+func WithErrorObserver(observer ErrorObserver) Option {
+	return func(cfg *config) {
+		if observer != nil {
+			cfg.errorObserver = observer
+		}
+	}
+}
+
+// Deprecated: use WithErrorObserver. Returned errors are ignored because
+// message-level failure flow is controlled by FailurePolicy.
 func WithErrorHandler(handler ErrorHandler) Option {
 	return func(cfg *config) {
 		if handler != nil {
-			cfg.errorHandler = handler
+			cfg.errorObserver = func(ctx context.Context, failure Error) {
+				_ = handler(ctx, failure)
+			}
 		}
 	}
 }
 
+// Deprecated: pass RetryThenDLQPolicy to NewConsumer.
 func WithRetryPolicy(policy RetryPolicy) Option {
-	return func(cfg *config) {
-		if policy.MaxAttempts > 0 {
-			cfg.retryPolicy.MaxAttempts = policy.MaxAttempts
-		}
-		if policy.Retryable != nil {
-			cfg.retryPolicy.Retryable = policy.Retryable
-		}
-	}
+	return func(*config) {}
 }
 
+// Deprecated: choose DropAndCommitPolicy or a custom FailurePolicy.
 func WithDLQDisabled() Option {
+	return func(*config) {}
+}
+
+func WithDefaultFailureTopics() Option {
 	return func(cfg *config) {
-		cfg.dlqEnabled = false
+		cfg.retryTopicResolver = defaultRetryTopicResolver
+		cfg.dlqTopicResolver = defaultDLQTopicResolver
 	}
 }
 
@@ -208,6 +265,21 @@ func WithDLQTopicResolver(resolver FailureTopicResolver) Option {
 		if resolver != nil {
 			cfg.dlqTopicResolver = resolver
 		}
+	}
+}
+
+func WithFailurePublishFallback(fallback FailurePublishFallback) Option {
+	return func(cfg *config) {
+		cfg.failureFallback = fallback
+	}
+}
+
+func WithPublishRetry(maxAttempts int, backoff PublishBackoff) Option {
+	return func(cfg *config) {
+		if maxAttempts > 1 {
+			cfg.publishRetry.maxAttempts = maxAttempts
+		}
+		cfg.publishRetry.backoff = backoff
 	}
 }
 

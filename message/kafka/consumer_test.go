@@ -60,6 +60,7 @@ func (f *fakeConsumerClient) Close() {
 type testHandler struct {
 	kinds []message.Kind
 	err   error
+	errs  []error
 	seen  []message.Message
 }
 
@@ -69,6 +70,11 @@ func (h *testHandler) Listening() []message.Kind {
 
 func (h *testHandler) Handle(_ context.Context, msg message.Message) error {
 	h.seen = append(h.seen, msg)
+	if len(h.errs) > 0 {
+		err := h.errs[0]
+		h.errs = h.errs[1:]
+		return err
+	}
 	return h.err
 }
 
@@ -95,7 +101,7 @@ func testRecord(t *testing.T, cfg config, kind message.Kind) *kgo.Record {
 func TestConsumerProcessRecordCommitsAfterSuccess(t *testing.T) {
 	cfg := testConsumerConfig()
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), cfg)
 	handler := &testHandler{kinds: []message.Kind{"order.payment.v1.OrderPaid"}}
 	if err := consumer.Subscribe(handler); err != nil {
 		t.Fatalf("Subscribe returned error: %v", err)
@@ -121,8 +127,9 @@ func TestConsumerProcessRecordCommitsAfterSuccess(t *testing.T) {
 // Intent: decode failures should route the raw source record to DLQ and commit only after DLQ publish succeeds.
 func TestConsumerProcessRecordDLQDecodeFailure(t *testing.T) {
 	cfg := testConsumerConfig()
+	WithDefaultFailureTopics()(&cfg)
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DLQPolicy(), cfg)
 	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
 	record.Value = []byte("not protobuf")
 
@@ -145,8 +152,9 @@ func TestConsumerProcessRecordDLQDecodeFailure(t *testing.T) {
 // Intent: retryable handler failures below the attempt limit should publish to retry and then commit the source.
 func TestConsumerProcessRecordRetriesHandlerError(t *testing.T) {
 	cfg := testConsumerConfig()
+	WithDefaultFailureTopics()(&cfg)
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	handlerErr := errors.New("handler failed")
 	if err := consumer.Subscribe(&testHandler{
 		kinds: []message.Kind{"order.payment.v1.OrderPaid"},
@@ -175,8 +183,9 @@ func TestConsumerProcessRecordRetriesHandlerError(t *testing.T) {
 // Intent: unhandled messages should be classified separately so retry/DLQ metadata shows routing gaps.
 func TestConsumerProcessRecordDLQUnhandledMessage(t *testing.T) {
 	cfg := testConsumerConfig()
+	WithDefaultFailureTopics()(&cfg)
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
 
 	err := consumer.processRecord(context.Background(), record)
@@ -187,8 +196,8 @@ func TestConsumerProcessRecordDLQUnhandledMessage(t *testing.T) {
 	if len(client.records) != 1 {
 		t.Fatalf("produced records = %d, want 1", len(client.records))
 	}
-	if client.records[0].Topic != "orders.retry" {
-		t.Fatalf("produced topic = %q, want orders.retry", client.records[0].Topic)
+	if client.records[0].Topic != "orders.dlq" {
+		t.Fatalf("produced topic = %q, want orders.dlq", client.records[0].Topic)
 	}
 	if got := headerValue(client.records[0].Headers, headerFailedStage); got != "unhandled" {
 		t.Fatalf("failed stage header = %q, want unhandled", got)
@@ -201,9 +210,10 @@ func TestConsumerProcessRecordDLQUnhandledMessage(t *testing.T) {
 // Intent: retry publish failures must leave the source uncommitted so Kafka can redeliver it.
 func TestConsumerProcessRecordDoesNotCommitWhenRetryPublishFails(t *testing.T) {
 	cfg := testConsumerConfig()
+	WithDefaultFailureTopics()(&cfg)
 	produceErr := errors.New("produce failed")
 	client := &fakeConsumerClient{produceErr: produceErr}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, RetryThenDLQPolicy(RetryThenDLQConfig{}), cfg)
 	if err := consumer.Subscribe(&testHandler{
 		kinds: []message.Kind{"order.payment.v1.OrderPaid"},
 		err:   errors.New("handler failed"),
@@ -228,9 +238,10 @@ func TestConsumerProcessRecordDoesNotCommitWhenRetryPublishFails(t *testing.T) {
 // Intent: DLQ publish failures must leave the source uncommitted so a decode failure is not lost.
 func TestConsumerProcessRecordDoesNotCommitWhenDLQPublishFails(t *testing.T) {
 	cfg := testConsumerConfig()
+	WithDefaultFailureTopics()(&cfg)
 	produceErr := errors.New("produce failed")
 	client := &fakeConsumerClient{produceErr: produceErr}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DLQPolicy(), cfg)
 	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
 	record.Value = []byte("not protobuf")
 
@@ -247,12 +258,12 @@ func TestConsumerProcessRecordDoesNotCommitWhenDLQPublishFails(t *testing.T) {
 	}
 }
 
-// Intent: commit failures should be surfaced through the default error handler rather than hidden after processing succeeds.
+// Intent: commit failures should be surfaced as runtime-level failures rather than hidden after processing succeeds.
 func TestConsumerProcessRecordReturnsCommitError(t *testing.T) {
 	cfg := testConsumerConfig()
 	commitErr := errors.New("commit failed")
 	client := &fakeConsumerClient{commitErr: commitErr}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), cfg)
 	if err := consumer.Subscribe(&testHandler{kinds: []message.Kind{"order.payment.v1.OrderPaid"}}); err != nil {
 		t.Fatalf("Subscribe returned error: %v", err)
 	}
@@ -268,17 +279,16 @@ func TestConsumerProcessRecordReturnsCommitError(t *testing.T) {
 	}
 }
 
-// Intent: commit failures must remain visible even when a custom error handler only observes and returns nil.
-func TestConsumerProcessRecordReturnsCommitErrorWhenCustomHandlerReturnsNil(t *testing.T) {
+// Intent: commit failures must remain visible even when a custom observer only records the failure.
+func TestConsumerProcessRecordReturnsCommitErrorWhenObserverRecordsFailure(t *testing.T) {
 	cfg := testConsumerConfig()
 	var handled []Error
-	WithErrorHandler(func(_ context.Context, failure Error) error {
+	WithErrorObserver(func(_ context.Context, failure Error) {
 		handled = append(handled, failure)
-		return nil
 	})(&cfg)
 	commitErr := errors.New("commit failed")
 	client := &fakeConsumerClient{commitErr: commitErr}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), cfg)
 	if err := consumer.Subscribe(&testHandler{kinds: []message.Kind{"order.payment.v1.OrderPaid"}}); err != nil {
 		t.Fatalf("Subscribe returned error: %v", err)
 	}
@@ -303,7 +313,7 @@ func TestConsumerProcessRecordReturnsCommitErrorWhenCustomHandlerReturnsNil(t *t
 // Intent: Close should only close the franz-go client when ownership was explicitly transferred to the consumer.
 func TestConsumerCloseHonorsClientOwnership(t *testing.T) {
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, defaultConfig())
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), defaultConfig())
 
 	consumer.Close()
 	if client.closed {
@@ -313,7 +323,7 @@ func TestConsumerCloseHonorsClientOwnership(t *testing.T) {
 	cfg := defaultConfig()
 	WithCloseClient(true)(&cfg)
 	ownedClient := &fakeConsumerClient{}
-	ownedConsumer := newConsumer(ownedClient, cfg)
+	ownedConsumer := newConsumerForTest(t, ownedClient, DropAndCommitPolicy(), cfg)
 	ownedConsumer.Close()
 	if !ownedClient.closed {
 		t.Fatal("owned client was not closed")
@@ -322,26 +332,27 @@ func TestConsumerCloseHonorsClientOwnership(t *testing.T) {
 
 // Intent: constructing a consumer with a nil franz-go client should fail record processing without a typed-nil panic.
 func TestNewConsumerNilClientProcessRecordReturnsErrNilClient(t *testing.T) {
-	consumer := NewConsumer(nil)
+	consumer, err := NewConsumer(nil, DropAndCommitPolicy())
+	if err != nil {
+		t.Fatalf("NewConsumer returned error: %v", err)
+	}
 
-	err := consumer.processRecord(context.Background(), &kgo.Record{Topic: "orders"})
+	err = consumer.processRecord(context.Background(), &kgo.Record{Topic: "orders"})
 
 	if !errors.Is(err, ErrNilClient) {
 		t.Fatalf("processRecord error = %v, want %v", err, ErrNilClient)
 	}
 }
 
-// Intent: when DLQ is disabled, only a custom nil-returning error handler may drop and commit a non-retryable failure.
-func TestConsumerProcessRecordDLQDisabledUsesErrorHandlerBeforeDrop(t *testing.T) {
+// Intent: an explicit drop policy observes a message-level failure, commits the source, and keeps the consumer moving.
+func TestConsumerProcessRecordDropPolicyObservesBeforeCommit(t *testing.T) {
 	cfg := testConsumerConfig()
 	var handled []Error
-	WithDLQDisabled()(&cfg)
-	WithErrorHandler(func(_ context.Context, failure Error) error {
+	WithErrorObserver(func(_ context.Context, failure Error) {
 		handled = append(handled, failure)
-		return nil
 	})(&cfg)
 	client := &fakeConsumerClient{}
-	consumer := newConsumer(client, cfg)
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), cfg)
 	record := testRecord(t, cfg, "order.payment.v1.OrderPaid")
 	record.Value = []byte("not protobuf")
 
@@ -361,21 +372,5 @@ func TestConsumerProcessRecordDLQDisabledUsesErrorHandlerBeforeDrop(t *testing.T
 	}
 	if len(client.committed) != 1 || client.committed[0] != record {
 		t.Fatalf("committed records = %#v, want source record", client.committed)
-	}
-
-	defaultCfg := testConsumerConfig()
-	WithDLQDisabled()(&defaultCfg)
-	defaultClient := &fakeConsumerClient{}
-	defaultConsumer := newConsumer(defaultClient, defaultCfg)
-	defaultRecord := testRecord(t, defaultCfg, "order.payment.v1.OrderPaid")
-	defaultRecord.Value = []byte("not protobuf")
-
-	err = defaultConsumer.processRecord(context.Background(), defaultRecord)
-
-	if err == nil {
-		t.Fatal("processRecord returned nil with default error handler, want original decode error")
-	}
-	if len(defaultClient.committed) != 0 {
-		t.Fatalf("default handler committed records = %d, want 0", len(defaultClient.committed))
 	}
 }

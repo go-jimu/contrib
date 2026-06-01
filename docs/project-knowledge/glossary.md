@@ -1,7 +1,7 @@
 ---
-last_updated: 2026-05-10
+last_updated: 2026-06-01
 updated_by: superpowers-memory:update
-triggered_by_plan: 2026-05-10-kafka-message-implementation.md
+triggered_by_plan: 2026-06-01-kafka-explicit-failure-policy
 ---
 
 # Glossary
@@ -20,4 +20,8 @@ triggered_by_plan: 2026-05-10-kafka-message-implementation.md
 
 **PayloadResolver** — Kafka provider hook that returns an empty protobuf payload for an incoming `message.Kind` before decode. → `message/kafka`
 
-**DLQ** — Dead-letter topic used by the Kafka provider after non-retryable or exhausted processing failures. → `message/kafka`
+**FailurePolicy** — Kafka consumer decision hook that maps a message-level failure to drop, retry, or DLQ. → `message/kafka`
+
+**ErrorObserver** — Kafka provider hook for recording failures without controlling consumer flow. → `message/kafka`
+
+**DLQ** — Dead-letter topic used by the Kafka provider after non-retryable or exhausted processing failures when explicitly configured. → `message/kafka`
