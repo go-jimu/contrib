@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/go-jimu/components v0.11.1
+	go.etcd.io/etcd/api/v3 v3.6.14
 	go.etcd.io/etcd/client/v3 v3.6.14
 )
 
@@ -19,7 +20,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/samber/oops v1.23.0 // indirect
-	go.etcd.io/etcd/api/v3 v3.6.14 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.14 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
