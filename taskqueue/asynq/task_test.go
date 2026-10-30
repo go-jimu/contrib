@@ -19,7 +19,7 @@ func TestTaskToAsynqMapsEnvelopeAndOptions(t *testing.T) {
 	task, err := taskqueue.New(
 		taskqueue.Definition{Type: "document.review.v1", Queue: "critical"},
 		[]byte(`{"id":"doc-1"}`),
-		taskqueue.WithKey("doc-1"),
+		taskqueue.WithID("doc-1"),
 		taskqueue.WithHeader("trace-id", "trace-1"),
 	)
 	if err != nil {

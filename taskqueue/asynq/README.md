@@ -39,7 +39,7 @@ enqueueing and delegates to asynq graceful shutdown.
 | `Payload()` | asynq task payload bytes |
 | `Headers()` | asynq task headers |
 | `Queue()` | `asynq.Queue` enqueue option |
-| `Key()` | `asynq.TaskID` enqueue option |
+| `ID()` | `asynq.TaskID` enqueue option |
 
 | `taskqueue.Schedule` field | asynq scheduler mapping |
 | --- | --- |
@@ -51,6 +51,18 @@ enqueueing and delegates to asynq graceful shutdown.
 `taskqueue.EnqueueOption` values map to asynq enqueue options:
 `WithDelay`, `WithProcessAt`, `WithMaxRetry`, `WithTimeout`, `WithDeadline`,
 and `WithUnique`.
+
+### Task ID
+
+asynq keeps a task ID while the task is pending, scheduled, active, retrying,
+or archived, and after completion for the queue's `asynq.Retention`. Enqueueing
+an ID it still keeps returns an error that matches both
+`taskqueue.ErrDuplicateTask` and `asynq.ErrTaskIDConflict` with `errors.Is`.
+Archived failures stay until asynq trims the archive, so delete or run them
+from asynq tooling to reuse their IDs.
+
+`WithUnique` duplicates are tasks with the same type, payload, and queue
+within the TTL; asynq reports them as `asynq.ErrDuplicateTask`.
 
 For periodic tasks, the component contract only accepts enqueue policies that
 make sense for repeated schedule fires. `WithUnique`, `WithMaxRetry`, and
@@ -90,7 +102,7 @@ func enqueue(ctx context.Context) error {
 	client := taskasynq.NewRedisClient(asynq.RedisClientOpt{Addr: "localhost:6379"})
 	defer client.Close()
 
-	task, err := registry.NewJSONTask(&ReviewDocument{ID: "doc-1"}, taskqueue.WithKey("doc-1"))
+	task, err := registry.NewJSONTask(&ReviewDocument{ID: "doc-1"}, taskqueue.WithID("review:doc-1"))
 	if err != nil {
 		return err
 	}

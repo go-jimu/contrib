@@ -29,7 +29,7 @@ func taskFromAsynq(ctx context.Context, task *hibiken.Task) (taskqueue.Task, err
 		taskqueue.WithHeaders(task.Headers()),
 	}
 	if id, ok := hibiken.GetTaskID(ctx); ok {
-		options = append(options, taskqueue.WithKey(id))
+		options = append(options, taskqueue.WithID(id))
 	}
 
 	queue := ""
@@ -49,8 +49,8 @@ func enqueueOptions(task taskqueue.Task, cfg taskqueue.EnqueueOptions) []hibiken
 	if task.Queue() != "" {
 		options = append(options, hibiken.Queue(task.Queue()))
 	}
-	if task.Key() != "" {
-		options = append(options, hibiken.TaskID(task.Key()))
+	if task.ID() != "" {
+		options = append(options, hibiken.TaskID(task.ID()))
 	}
 	if delay := cfg.Delay(); delay != 0 {
 		options = append(options, hibiken.ProcessIn(delay))

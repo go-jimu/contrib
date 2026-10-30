@@ -18,7 +18,6 @@ func TestSchedulerRegisterPeriodicTaskMapsTaskAndPolicy(t *testing.T) {
 	task, err := taskqueue.New(
 		taskqueue.Definition{Type: "billing.generate_invoices.v1", Queue: "billing"},
 		[]byte(`{"date":"2026-05-29"}`),
-		taskqueue.WithKey("billing:2026-05-29"),
 		taskqueue.WithHeader("trace-id", "trace-1"),
 	)
 	if err != nil {
@@ -65,8 +64,8 @@ func TestSchedulerRegisterPeriodicTaskMapsTaskAndPolicy(t *testing.T) {
 	if values[hibiken.QueueOpt] != "billing" {
 		t.Fatalf("queue option = %#v", values[hibiken.QueueOpt])
 	}
-	if values[hibiken.TaskIDOpt] != "billing:2026-05-29" {
-		t.Fatalf("task id option = %#v", values[hibiken.TaskIDOpt])
+	if _, ok := values[hibiken.TaskIDOpt]; ok {
+		t.Fatalf("periodic task has a task id option: %#v", values[hibiken.TaskIDOpt])
 	}
 	if values[hibiken.UniqueOpt] != 25*time.Hour {
 		t.Fatalf("unique option = %#v", values[hibiken.UniqueOpt])
