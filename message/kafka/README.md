@@ -168,8 +168,9 @@ commit semantics.
 `message.Handler.Handle` errors are message-level failures. They do not stop
 `Run` by themselves. The required `FailurePolicy` decides whether the failed
 source record is dropped, retried, or published to DLQ. `Consumer.Run` returns
-only when the runtime cannot continue, the context is canceled, commit fails, or
-failure publishing fails with the stop fallback.
+nil when ctx is canceled or expires, which is a normal shutdown. It returns an
+error when the runtime cannot continue: commit fails, or failure publishing
+fails with the stop fallback.
 
 - return `nil` when processing is complete and the source offset may be committed;
 - return an error when the provider should apply the configured failure policy;

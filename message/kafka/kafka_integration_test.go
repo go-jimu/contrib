@@ -51,7 +51,7 @@ func startIntegrationRun(t *testing.T, consumer *Consumer) *integrationRun {
 
 	t.Cleanup(func() {
 		cancel()
-		if err := run.wait(30 * time.Second); err != nil && !errors.Is(err, context.Canceled) {
+		if err := run.wait(30 * time.Second); err != nil {
 			t.Errorf("wait for consumer Run cleanup: %v", err)
 		}
 	})
@@ -193,8 +193,8 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 		t.Fatalf("payload = {Id:%d Name:%q}, want {Id:7 Name:%q}", payload.GetId(), payload.GetName(), "paid")
 	}
 
-	if err := run.stopAndWait(30 * time.Second); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	if err := run.stopAndWait(30 * time.Second); err != nil {
+		t.Fatalf("Run error = %v, want nil on ctx shutdown", err)
 	}
 }
 
@@ -260,8 +260,8 @@ func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
 		t.Fatalf("failed stage header = %q, want %q", got, StageHandle)
 	}
 
-	if err := run.stopAndWait(30 * time.Second); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	if err := run.stopAndWait(30 * time.Second); err != nil {
+		t.Fatalf("Run error = %v, want nil on ctx shutdown", err)
 	}
 }
 

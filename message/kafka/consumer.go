@@ -65,6 +65,15 @@ func (c *Consumer) Close() {
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
+	err := c.run(ctx)
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		// ctx ending is a normal shutdown, as message.Runner defines.
+		return nil
+	}
+	return err
+}
+
+func (c *Consumer) run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
