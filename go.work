@@ -6,7 +6,6 @@ use (
 	./config/etcd
 	./config/nacos
 	./config/kubernetes
-	./logger/zap
 	./message/kafka
 	./taskqueue/asynq
 )
