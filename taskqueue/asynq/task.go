@@ -2,10 +2,16 @@ package asynq
 
 import (
 	"context"
+	"maps"
 
 	"github.com/go-jimu/components/taskqueue"
 	hibiken "github.com/hibiken/asynq"
 )
+
+// PayloadCodecHeader is the asynq task header that carries
+// taskqueue.Task.PayloadCodec. It is reserved: the adapter sets it on enqueue
+// and removes it from the headers processors see.
+const PayloadCodecHeader = "jimu-payload-codec"
 
 func taskToAsynq(task taskqueue.Task, opts ...taskqueue.EnqueueOption) (*hibiken.Task, []hibiken.Option, error) {
 	return taskToAsynqWithPolicy(task, taskqueue.NewEnqueueOptions(opts...))
@@ -16,7 +22,14 @@ func taskToAsynqWithPolicy(task taskqueue.Task, policy taskqueue.EnqueueOptions)
 		return nil, nil, taskqueue.ErrEmptyType
 	}
 
-	asynqTask := hibiken.NewTaskWithHeaders(string(task.Type()), task.Payload(), task.Headers())
+	headers := task.Headers()
+	if codec := task.PayloadCodec(); codec != "" {
+		if headers == nil {
+			headers = make(map[string]string, 1)
+		}
+		headers[PayloadCodecHeader] = codec
+	}
+	asynqTask := hibiken.NewTaskWithHeaders(string(task.Type()), task.Payload(), headers)
 	return asynqTask, enqueueOptions(task, policy), nil
 }
 
@@ -25,11 +38,15 @@ func taskFromAsynq(ctx context.Context, task *hibiken.Task) (taskqueue.Task, err
 		return taskqueue.Task{}, ErrNilTask
 	}
 
+	// The task ID asynq reports is provider-assigned unless the producer set
+	// one, so it reaches processors through taskqueue.ExecutionInfo instead of
+	// Task.ID, which is reserved for caller-assigned identities.
+	headers := maps.Clone(task.Headers())
+	codec := headers[PayloadCodecHeader]
+	delete(headers, PayloadCodecHeader)
 	options := []taskqueue.Option{
-		taskqueue.WithHeaders(task.Headers()),
-	}
-	if id, ok := hibiken.GetTaskID(ctx); ok {
-		options = append(options, taskqueue.WithID(id))
+		taskqueue.WithHeaders(headers),
+		taskqueue.WithPayloadCodec(codec),
 	}
 
 	queue := ""

@@ -118,3 +118,47 @@ func optionValues(opts []hibiken.Option) map[hibiken.OptionType]any {
 	}
 	return values
 }
+
+// Intent: the payload codec survives the trip through asynq, so a worker can
+// decode with SchemaRegistry.Decode, and the reserved header stays out of the
+// headers processors see.
+func TestTaskPayloadCodecRoundTrip(t *testing.T) {
+	type review struct {
+		ID string `json:"id"`
+	}
+	def := taskqueue.Definition{Type: "document.review.v1"}
+	registry := taskqueue.NewSchemaRegistry()
+	if err := registry.Register(def, func() any { return &review{} }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	produced, err := registry.NewJSONTask(&review{ID: "doc-1"}, taskqueue.WithHeader("trace-id", "trace-1"))
+	if err != nil {
+		t.Fatalf("NewJSONTask: %v", err)
+	}
+
+	asynqTask, _, err := taskToAsynq(produced)
+	if err != nil {
+		t.Fatalf("taskToAsynq: %v", err)
+	}
+	consumed, err := taskFromAsynq(context.Background(), asynqTask)
+	if err != nil {
+		t.Fatalf("taskFromAsynq: %v", err)
+	}
+
+	if consumed.PayloadCodec() != taskqueue.JSONCodec {
+		t.Fatalf("payload codec = %q, want %q", consumed.PayloadCodec(), taskqueue.JSONCodec)
+	}
+	payload, err := registry.Decode(consumed)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := payload.(*review).ID; got != "doc-1" {
+		t.Fatalf("decoded id = %q", got)
+	}
+	if got := consumed.Headers(); !reflect.DeepEqual(got, map[string]string{"trace-id": "trace-1"}) {
+		t.Fatalf("headers = %#v", got)
+	}
+	if asynqTask.Headers()[PayloadCodecHeader] != taskqueue.JSONCodec {
+		t.Fatalf("asynq headers = %#v, want the codec header kept", asynqTask.Headers())
+	}
+}
