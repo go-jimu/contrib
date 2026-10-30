@@ -68,7 +68,7 @@ func Master(master string) Option {
 
 type kube struct {
 	opts   options
-	client *kubernetes.Clientset
+	client kubernetes.Interface
 }
 
 // NewSource new a kubernetes config source.
