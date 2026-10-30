@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/apolloconfig/agollo/v4/agcache"
 	"github.com/apolloconfig/agollo/v4/storage"
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/sloghelper"
@@ -18,8 +19,10 @@ type watcher struct {
 }
 
 type customChangeListener struct {
-	in     chan<- []*config.KeyValue
-	apollo *apollo
+	in chan<- []*config.KeyValue
+	// cacheOf returns the cache of a namespace, which agollo has already
+	// updated when it reports a change.
+	cacheOf func(namespace string) agcache.CacheInterface
 }
 
 func (c *customChangeListener) onChange(namespace string, changes map[string]*storage.ConfigChange) []*config.KeyValue {
@@ -37,25 +40,14 @@ func (c *customChangeListener) onChange(namespace string, changes map[string]*st
 		}
 	}
 
-	next := make(map[string]interface{})
-
-	for key, change := range changes {
-		resolve(genKey(namespace, key), change.NewValue, next)
-	}
-
-	f := format(namespace)
-	val, err := marshal(f, next)
+	// changes holds only the changed keys; rebuild the namespace from its cache
+	// so the unchanged keys stay in config.
+	next, err := namespaceKeyValue(namespace, c.cacheOf(namespace))
 	if err != nil {
 		slog.Warn("apollo could not handle namespace", slog.String("namespace", namespace), sloghelper.Error(err))
 		return nil
 	}
-	kv = append(kv, &config.KeyValue{
-		Key:    namespace,
-		Value:  val,
-		Format: f,
-	})
-
-	return kv
+	return append(kv, next)
 }
 
 func (c *customChangeListener) OnChange(changeEvent *storage.ChangeEvent) {
@@ -71,7 +63,7 @@ func (c *customChangeListener) OnNewestChange(_ *storage.FullChangeEvent) {}
 
 func newWatcher(a *apollo) (config.Watcher, error) {
 	changeCh := make(chan []*config.KeyValue)
-	listener := &customChangeListener{in: changeCh, apollo: a}
+	listener := &customChangeListener{in: changeCh, cacheOf: a.client.GetConfigCache}
 	a.client.AddChangeListener(listener)
 
 	ctx, cancel := context.WithCancel(context.Background())

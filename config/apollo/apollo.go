@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/apolloconfig/agollo/v4"
+	"github.com/apolloconfig/agollo/v4/agcache"
 	"github.com/apolloconfig/agollo/v4/constant"
 	apolloconfig "github.com/apolloconfig/agollo/v4/env/config"
 	"github.com/apolloconfig/agollo/v4/extension"
@@ -188,12 +189,21 @@ func (e *apollo) load() []*config.KeyValue {
 }
 
 func (e *apollo) getConfig(ns string) (*config.KeyValue, error) {
+	return namespaceKeyValue(ns, e.client.GetConfigCache(ns))
+}
+
+// namespaceKeyValue encodes every key of a properties-style namespace from its
+// cache. A change to the namespace replaces the whole value in config, so the
+// value always carries the full namespace.
+func namespaceKeyValue(ns string, cache agcache.CacheInterface) (*config.KeyValue, error) {
 	next := map[string]interface{}{}
-	e.client.GetConfigCache(ns).Range(func(key, value interface{}) bool {
-		// all values are out properties format
-		resolve(genKey(ns, key.(string)), value, next)
-		return true
-	})
+	if cache != nil {
+		cache.Range(func(key, value interface{}) bool {
+			// all values are out properties format
+			resolve(genKey(ns, key.(string)), value, next)
+			return true
+		})
+	}
 	f := format(ns)
 	val, err := marshal(f, next)
 	if err != nil {
