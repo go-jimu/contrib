@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/config/etcd
 go 1.26.0
 
 require (
-	github.com/go-jimu/components v0.11.1
+	github.com/go-jimu/components v0.11.2
 	go.etcd.io/etcd/api/v3 v3.7.3
 	go.etcd.io/etcd/client/v3 v3.7.3
 )

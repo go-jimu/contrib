@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/apolloconfig/agollo/v5 v5.0.0
-	github.com/go-jimu/components v0.11.1
+	github.com/go-jimu/components v0.11.2
 )
 
 require (

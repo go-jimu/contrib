@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/config/kubernetes
 go 1.26.0
 
 require (
-	github.com/go-jimu/components v0.11.1
+	github.com/go-jimu/components v0.11.2
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2

@@ -10,8 +10,8 @@ github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 github.com/fxamacker/cbor/v2 v2.9.1 h1:2rWm8B193Ll4VdjsJY28jxs70IdDsHRWgQYAI80+rMQ=
 github.com/fxamacker/cbor/v2 v2.9.1/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
-github.com/go-jimu/components v0.11.1 h1:vp7I8Yorh/6xMeL8slOu18bzGIciyWCjpwSDP0/S5gU=
-github.com/go-jimu/components v0.11.1/go.mod h1:jC3XNWmkMl50pAiyPP5BqHyv6SY3Q7wVgzKvbVx1xc4=
+github.com/go-jimu/components v0.11.2 h1:QUKBe36999mCFZG9HBOo6/ZfxtpXSquT9WW3qr5uEHM=
+github.com/go-jimu/components v0.11.2/go.mod h1:jC3XNWmkMl50pAiyPP5BqHyv6SY3Q7wVgzKvbVx1xc4=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-openapi/jsonpointer v1.0.0 h1:kR9tHqY0CtZaOPVFm622dPVNhrvYpwr4uCxgL3h1H8s=
