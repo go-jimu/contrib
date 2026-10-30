@@ -88,3 +88,11 @@ func Test_format(t *testing.T) {
 		})
 	}
 }
+
+// Intent: a format without a registered codec is an error, not a nil
+// pointer panic.
+func TestMarshalUnknownFormat(t *testing.T) {
+	if _, err := marshal("unregistered", map[string]interface{}{"a": 1}); err == nil {
+		t.Fatal("marshal returned nil error for a format without a codec")
+	}
+}

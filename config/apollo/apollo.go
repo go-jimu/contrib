@@ -1,6 +1,7 @@
 package apollo
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -129,6 +130,15 @@ func NewSource(opts ...Option) config.Source {
 	return &apollo{client: client, opt: &op}
 }
 
+// marshal encodes namespace values with the codec registered for format.
+func marshal(format string, v interface{}) ([]byte, error) {
+	codec := encoding.GetCodec(format)
+	if codec == nil {
+		return nil, fmt.Errorf("apollo: no codec registered for format %q", format)
+	}
+	return codec.Marshal(v)
+}
+
 func format(ns string) string {
 	arr := strings.Split(ns, ".")
 	suffix := arr[len(arr)-1]
@@ -185,8 +195,7 @@ func (e *apollo) getConfig(ns string) (*config.KeyValue, error) {
 		return true
 	})
 	f := format(ns)
-	codec := encoding.GetCodec(f)
-	val, err := codec.Marshal(next)
+	val, err := marshal(f, next)
 	if err != nil {
 		return nil, err
 	}

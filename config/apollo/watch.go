@@ -7,7 +7,6 @@ import (
 
 	"github.com/apolloconfig/agollo/v4/storage"
 	"github.com/go-jimu/components/config"
-	"github.com/go-jimu/components/encoding"
 	"github.com/go-jimu/components/sloghelper"
 )
 
@@ -45,8 +44,7 @@ func (c *customChangeListener) onChange(namespace string, changes map[string]*st
 	}
 
 	f := format(namespace)
-	codec := encoding.GetCodec(f)
-	val, err := codec.Marshal(next)
+	val, err := marshal(f, next)
 	if err != nil {
 		slog.Warn("apollo could not handle namespace", slog.String("namespace", namespace), sloghelper.Error(err))
 		return nil
