@@ -1,9 +1,9 @@
 module github.com/go-jimu/contrib/config/apollo
 
-go 1.25.0
+go 1.26.0
 
 require (
-	github.com/apolloconfig/agollo/v4 v4.4.0
+	github.com/apolloconfig/agollo/v5 v5.0.0
 	github.com/go-jimu/components v0.11.1
 )
 
@@ -27,9 +27,9 @@ require (
 	github.com/subosito/gotenv v1.2.0 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/protobuf v1.36.9 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/ini.v1 v1.62.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

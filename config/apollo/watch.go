@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/apolloconfig/agollo/v4/agcache"
-	"github.com/apolloconfig/agollo/v4/storage"
+	"github.com/apolloconfig/agollo/v5/agcache"
+	"github.com/apolloconfig/agollo/v5/storage"
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/sloghelper"
 )
