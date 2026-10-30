@@ -2,8 +2,6 @@
 
 Etcd-backed implementation of `github.com/go-jimu/components/config`.
 
-This module is compatible with `github.com/go-jimu/components v0.8.0`.
-
 ## Install
 
 ```bash

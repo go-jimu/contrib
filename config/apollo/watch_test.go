@@ -1,9 +1,13 @@
 package apollo
 
 import (
+	"context"
 	"testing"
+	"time"
 
-	"github.com/apolloconfig/agollo/v4/storage"
+	"github.com/apolloconfig/agollo/v5/agcache"
+	"github.com/apolloconfig/agollo/v5/agcache/memory"
+	"github.com/apolloconfig/agollo/v5/storage"
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/encoding"
 )
@@ -18,7 +22,9 @@ func Test_onChange(t *testing.T) {
 	}
 	codec := encoding.GetCodec(yaml)
 	val, _ := codec.Marshal(s)
-	c := customChangeListener{}
+	cache := (&memory.DefaultCacheFactory{}).Create()
+	_ = cache.Set("name", "new", 0)
+	c := customChangeListener{cacheOf: func(string) agcache.CacheInterface { return cache }}
 	tests := []struct {
 		name      string
 		namespace string
@@ -75,4 +81,82 @@ func Test_onChange(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Intent: a change to a properties namespace reports only the changed keys,
+// while config replaces the namespace with the reported value. The unchanged
+// keys must survive the reload.
+func TestOnChangeKeepsUnchangedPropertiesKeys(t *testing.T) {
+	cache := (&memory.DefaultCacheFactory{}).Create()
+	_ = cache.Set("a", "1", 0)
+	_ = cache.Set("b", "2", 0)
+	listener := customChangeListener{cacheOf: func(string) agcache.CacheInterface { return cache }}
+	loaded, err := namespaceKeyValue("application", cache)
+	if err != nil {
+		t.Fatalf("namespaceKeyValue: %v", err)
+	}
+
+	// agollo updates the cache, then reports only the changed key.
+	_ = cache.Set("a", "3", 0)
+	changed := listener.onChange("application", map[string]*storage.ConfigChange{
+		"a": {OldValue: "1", NewValue: "3", ChangeType: storage.MODIFIED},
+	})
+
+	source := &changeSource{loaded: []*config.KeyValue{loaded}, next: make(chan []*config.KeyValue, 1)}
+	cfg := config.New(config.WithSource(source))
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	defer cfg.Close()
+	source.next <- changed
+
+	var got struct {
+		Application map[string]string `json:"application"`
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		got.Application = nil
+		if err := cfg.Scan(&got); err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if got.Application["a"] == "3" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("application = %v, want a=3", got.Application)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got.Application["b"] != "2" {
+		t.Fatalf("application = %v, want b=2 kept", got.Application)
+	}
+}
+
+type changeSource struct {
+	loaded []*config.KeyValue
+	next   chan []*config.KeyValue
+}
+
+func (s *changeSource) Load() ([]*config.KeyValue, error) { return s.loaded, nil }
+func (s *changeSource) Watch() (config.Watcher, error) {
+	return &changeWatcher{source: s, done: make(chan struct{})}, nil
+}
+
+type changeWatcher struct {
+	source *changeSource
+	done   chan struct{}
+}
+
+func (w *changeWatcher) Next() ([]*config.KeyValue, error) {
+	select {
+	case kvs := <-w.source.next:
+		return kvs, nil
+	case <-w.done:
+		return nil, context.Canceled
+	}
+}
+
+func (w *changeWatcher) Stop() error {
+	close(w.done)
+	return nil
 }

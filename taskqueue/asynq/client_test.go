@@ -17,7 +17,7 @@ func TestClientEnqueueUsesAsynqClient(t *testing.T) {
 	task, err := taskqueue.New(
 		taskqueue.Definition{Type: "document.review.v1", Queue: "critical"},
 		[]byte(`{"id":"doc-1"}`),
-		taskqueue.WithKey("doc-1"),
+		taskqueue.WithID("doc-1"),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -75,6 +75,25 @@ func TestClientCloseDelegatesToUnderlyingClient(t *testing.T) {
 	}
 	if !fake.closed {
 		t.Fatal("underlying client was not closed")
+	}
+}
+
+// Intent: an asynq task ID conflict is the component ErrDuplicateTask, so
+// application code detects it without importing asynq.
+func TestClientEnqueueMapsTaskIDConflict(t *testing.T) {
+	client := newClient(&fakeEnqueueClient{err: hibiken.ErrTaskIDConflict})
+	task, err := taskqueue.New(taskqueue.Definition{Type: "document.review.v1"}, nil, taskqueue.WithID("review:doc-1"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = client.Enqueue(context.Background(), task)
+
+	if !errors.Is(err, taskqueue.ErrDuplicateTask) {
+		t.Fatalf("err = %v, want taskqueue.ErrDuplicateTask", err)
+	}
+	if !errors.Is(err, hibiken.ErrTaskIDConflict) {
+		t.Fatalf("err = %v, want asynq.ErrTaskIDConflict", err)
 	}
 }
 

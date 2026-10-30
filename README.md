@@ -14,7 +14,6 @@ so applications can depend only on the adapters they actually use.
 | `config/etcd` | `components/config` | etcd |
 | `config/kubernetes` | `components/config` | Kubernetes ConfigMap |
 | `config/nacos` | `components/config` | Nacos |
-| `logger/zap` | `components/logger` | zap |
 | `message/kafka` | `components/ddd/message` | Kafka through franz-go |
 | `taskqueue/asynq` | `components/taskqueue` | asynq |
 

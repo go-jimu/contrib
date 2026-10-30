@@ -2,6 +2,8 @@ package asynq
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/go-jimu/components/taskqueue"
 	hibiken "github.com/hibiken/asynq"
@@ -51,7 +53,11 @@ func (c *Client) EnqueueInfo(ctx context.Context, task taskqueue.Task, opts ...t
 	if err != nil {
 		return nil, err
 	}
-	return c.client.EnqueueContext(ctx, asynqTask, asynqOpts...)
+	info, err := c.client.EnqueueContext(ctx, asynqTask, asynqOpts...)
+	if errors.Is(err, hibiken.ErrTaskIDConflict) {
+		return nil, fmt.Errorf("%w: %w", taskqueue.ErrDuplicateTask, err)
+	}
+	return info, err
 }
 
 func (c *Client) Close() error {

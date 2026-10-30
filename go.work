@@ -1,4 +1,4 @@
-go 1.25.0
+go 1.26.0
 
 use (
 	.
@@ -6,7 +6,12 @@ use (
 	./config/etcd
 	./config/nacos
 	./config/kubernetes
-	./logger/zap
 	./message/kafka
 	./taskqueue/asynq
 )
+
+// etcd uses the split google.golang.org/genproto/googleapis/* modules, while
+// apollo still pulls in the pre-split genproto, which contains the same
+// packages. Each module builds alone; the workspace pins the pre-split module
+// to a version that no longer has them.
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20261026165753-2ffab32bce7e

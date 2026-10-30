@@ -1,13 +1,15 @@
 package apollo
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 
-	"github.com/apolloconfig/agollo/v4"
-	"github.com/apolloconfig/agollo/v4/constant"
-	apolloconfig "github.com/apolloconfig/agollo/v4/env/config"
-	"github.com/apolloconfig/agollo/v4/extension"
+	"github.com/apolloconfig/agollo/v5"
+	"github.com/apolloconfig/agollo/v5/agcache"
+	"github.com/apolloconfig/agollo/v5/constant"
+	apolloconfig "github.com/apolloconfig/agollo/v5/env/config"
+	"github.com/apolloconfig/agollo/v5/extension"
 	"github.com/go-jimu/components/config"
 	"github.com/go-jimu/components/encoding"
 	"github.com/go-jimu/components/sloghelper"
@@ -129,6 +131,15 @@ func NewSource(opts ...Option) config.Source {
 	return &apollo{client: client, opt: &op}
 }
 
+// marshal encodes namespace values with the codec registered for format.
+func marshal(format string, v interface{}) ([]byte, error) {
+	codec := encoding.GetCodec(format)
+	if codec == nil {
+		return nil, fmt.Errorf("apollo: no codec registered for format %q", format)
+	}
+	return codec.Marshal(v)
+}
+
 func format(ns string) string {
 	arr := strings.Split(ns, ".")
 	suffix := arr[len(arr)-1]
@@ -178,15 +189,23 @@ func (e *apollo) load() []*config.KeyValue {
 }
 
 func (e *apollo) getConfig(ns string) (*config.KeyValue, error) {
+	return namespaceKeyValue(ns, e.client.GetConfigCache(ns))
+}
+
+// namespaceKeyValue encodes every key of a properties-style namespace from its
+// cache. A change to the namespace replaces the whole value in config, so the
+// value always carries the full namespace.
+func namespaceKeyValue(ns string, cache agcache.CacheInterface) (*config.KeyValue, error) {
 	next := map[string]interface{}{}
-	e.client.GetConfigCache(ns).Range(func(key, value interface{}) bool {
-		// all values are out properties format
-		resolve(genKey(ns, key.(string)), value, next)
-		return true
-	})
+	if cache != nil {
+		cache.Range(func(key, value interface{}) bool {
+			// all values are out properties format
+			resolve(genKey(ns, key.(string)), value, next)
+			return true
+		})
+	}
 	f := format(ns)
-	codec := encoding.GetCodec(f)
-	val, err := codec.Marshal(next)
+	val, err := marshal(f, next)
 	if err != nil {
 		return nil, err
 	}

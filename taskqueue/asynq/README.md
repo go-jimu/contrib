@@ -38,8 +38,9 @@ enqueueing and delegates to asynq graceful shutdown.
 | `Type()` | asynq task type |
 | `Payload()` | asynq task payload bytes |
 | `Headers()` | asynq task headers |
+| `PayloadCodec()` | the reserved asynq header `jimu-payload-codec` (`PayloadCodecHeader`), removed again before processors see the headers |
 | `Queue()` | `asynq.Queue` enqueue option |
-| `Key()` | `asynq.TaskID` enqueue option |
+| `ID()` | `asynq.TaskID` enqueue option. Processors receive the ID asynq assigned, or the one the producer set, through `taskqueue.ExecutionInfo.TaskID()`; `Task.ID()` on the worker is empty |
 
 | `taskqueue.Schedule` field | asynq scheduler mapping |
 | --- | --- |
@@ -52,14 +53,29 @@ enqueueing and delegates to asynq graceful shutdown.
 `WithDelay`, `WithProcessAt`, `WithMaxRetry`, `WithTimeout`, `WithDeadline`,
 and `WithUnique`.
 
-For periodic tasks, the component contract only accepts enqueue policies that
-make sense for repeated schedule fires. `WithUnique`, `WithMaxRetry`, and
-`WithTimeout` are safe common choices; `WithDelay` is allowed when each
-scheduled fire should enqueue work for later processing. Absolute timing
-policies such as `WithProcessAt` and `WithDeadline` are rejected by
-`taskqueue.NewPeriodicTask`, because a static absolute time becomes stale after
-the first fire. `IntervalSchedule` is duration-based and rejects `WithLocation`;
-use `CronSchedule(..., WithLocation(...))` for wall-clock timezone semantics.
+### Task ID
+
+asynq scopes a task ID to its queue: the same ID in two queues never
+conflicts. Within a queue, asynq keeps the ID while the task is pending,
+scheduled, active, retrying, or archived, and frees it as soon as the task
+completes, since this adapter sets no `asynq.Retention`. Archived tasks stay
+until asynq trims the archive (at 10,000 tasks or 90 days); delete or run them
+from asynq tooling to reuse their IDs. Enqueueing an ID that asynq still keeps
+returns an error that matches both `taskqueue.ErrDuplicateTask` and
+`asynq.ErrTaskIDConflict` with `errors.Is`.
+
+`WithUnique(ttl)` compares task type, payload, and queue. asynq holds the
+uniqueness lock until the TTL expires or the original task completes
+successfully, whichever comes first, and reports a duplicate as
+`asynq.ErrDuplicateTask`.
+
+### Registration and runtime errors
+
+`Worker.Register` and `Scheduler.RegisterPeriodicTask` work before and after
+`Start`. `Run` returns only startup and shutdown errors. Failures after
+startup surface through asynq's own hooks: `asynq.Config.ErrorHandler` for
+processor errors, `asynq.Config.HealthCheckFunc` for Redis connectivity, and
+`asynq.SchedulerOpts.EnqueueErrorHandler` for periodic enqueue failures.
 
 ## Enqueue
 
@@ -90,7 +106,7 @@ func enqueue(ctx context.Context) error {
 	client := taskasynq.NewRedisClient(asynq.RedisClientOpt{Addr: "localhost:6379"})
 	defer client.Close()
 
-	task, err := registry.NewJSONTask(&ReviewDocument{ID: "doc-1"}, taskqueue.WithKey("doc-1"))
+	task, err := registry.NewJSONTask(&ReviewDocument{ID: "doc-1"}, taskqueue.WithID("review:doc-1"))
 	if err != nil {
 		return err
 	}

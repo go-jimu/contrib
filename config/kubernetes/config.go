@@ -68,7 +68,7 @@ func Master(master string) Option {
 
 type kube struct {
 	opts   options
-	client *kubernetes.Clientset
+	client kubernetes.Interface
 }
 
 // NewSource new a kubernetes config source.
@@ -133,8 +133,12 @@ func (k *kube) Load() ([]*config.KeyValue, error) {
 	if k.opts.Namespace == "" {
 		return nil, errors.New("options namespace not full")
 	}
-	if err := k.init(); err != nil {
-		return nil, err
+	// The client is created once: the watcher keeps using it while a later
+	// Load, such as a config retry, runs.
+	if k.client == nil {
+		if err := k.init(); err != nil {
+			return nil, err
+		}
 	}
 	return k.load()
 }

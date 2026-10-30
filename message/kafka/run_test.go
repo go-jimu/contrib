@@ -78,8 +78,8 @@ func TestConsumerRunProcessesFetchedRecords(t *testing.T) {
 
 	err := consumer.Run(ctx)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	if err != nil {
+		t.Fatalf("Run error = %v, want nil on ctx shutdown", err)
 	}
 	if len(handler.seen) != 1 {
 		t.Fatalf("handler saw %d messages, want 1", len(handler.seen))
