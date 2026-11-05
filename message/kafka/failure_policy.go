@@ -2,6 +2,7 @@ package kafka
 
 import "context"
 
+// FailureAction is a FailurePolicy decision for one failed record.
 type FailureAction int
 
 const (
@@ -13,7 +14,11 @@ const (
 	FailureActionDLQ
 )
 
-// FailurePolicy decides how a message-level consumer failure should be handled.
+// FailurePolicy decides how a message-level consumer failure should be
+// handled: StageDecode, StageUnhandled, or StageHandle. Decide runs on the Run
+// goroutine and must not block; an unknown FailureAction counts as
+// FailureActionDrop. The package documentation compares the built-in
+// policies.
 type FailurePolicy interface {
 	Decide(context.Context, Error) FailureAction
 }
@@ -21,18 +26,22 @@ type FailurePolicy interface {
 // FailurePolicyFunc adapts a function into a FailurePolicy.
 type FailurePolicyFunc func(context.Context, Error) FailureAction
 
+// Decide calls f(ctx, failure).
 func (f FailurePolicyFunc) Decide(ctx context.Context, failure Error) FailureAction {
 	return f(ctx, failure)
 }
 
-// DropAndCommitPolicy drops every message-level failure and commits the source offset.
+// DropAndCommitPolicy drops every message-level failure and commits the source
+// offset; the failed message is lost. It needs no failure topics.
 func DropAndCommitPolicy() FailurePolicy {
 	return FailurePolicyFunc(func(context.Context, Error) FailureAction {
 		return FailureActionDrop
 	})
 }
 
-// DLQPolicy sends every message-level failure to DLQ.
+// DLQPolicy sends every message-level failure to DLQ, then commits. It needs
+// WithDefaultFailureTopics or WithDLQTopicResolver; without one, every
+// failure is a DLQ publish failure.
 func DLQPolicy() FailurePolicy {
 	return FailurePolicyFunc(func(context.Context, Error) FailureAction {
 		return FailureActionDLQ
@@ -41,12 +50,23 @@ func DLQPolicy() FailurePolicy {
 
 // RetryThenDLQConfig configures RetryThenDLQPolicy.
 type RetryThenDLQConfig struct {
+	// MaxAttempts is the number of handler attempts, counting the first;
+	// 0 or less means 3.
 	MaxAttempts int
-	Retryable   func(Error) bool
-	DLQable     func(Error) bool
+	// Retryable reports whether a failure may be retried. nil retries
+	// StageHandle failures only.
+	Retryable func(Error) bool
+	// DLQable reports whether a failure that is not retried goes to DLQ;
+	// otherwise it is dropped. nil sends StageDecode, StageUnhandled, and
+	// StageHandle failures to DLQ.
+	DLQable func(Error) bool
 }
 
-// RetryThenDLQPolicy retries retryable failures until MaxAttempts, then sends DLQable failures to DLQ.
+// RetryThenDLQPolicy retries Retryable failures by publishing them to the
+// retry topic until the record has had MaxAttempts handler attempts, read from
+// its jimu-retry-attempt header; then it sends DLQable failures to DLQ and
+// drops the rest. It needs retry and DLQ topic resolvers, and the consumer
+// must consume the retry topics for retries to run.
 func RetryThenDLQPolicy(cfg RetryThenDLQConfig) FailurePolicy {
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3

@@ -20,6 +20,10 @@ type pollClient interface {
 	PollFetches(context.Context) kgo.Fetches
 }
 
+// Consumer consumes records with a franz-go consumer-group client, decodes
+// them into message.Message values, routes them to subscribed handlers, and
+// commits offsets. It implements message.Subscriber and message.Runner. The
+// package documentation describes its failure handling and lifecycle.
 type Consumer struct {
 	client        pollClient
 	failurePolicy FailurePolicy
@@ -27,6 +31,13 @@ type Consumer struct {
 	router        *message.Router
 }
 
+// NewConsumer returns a Consumer for client, which must be configured with
+// kgo.ConsumerGroup, kgo.ConsumeTopics, and kgo.DisableAutoCommit. policy
+// decides message-level failures. Pass WithPayloadResolver to decode payloads,
+// and failure topic options when policy retries or uses DLQ.
+//
+// It returns ErrNilFailurePolicy for a nil policy. A nil client is reported
+// later, by Run, as ErrNilClient. NewConsumer starts nothing.
 func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Consumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -54,16 +65,27 @@ func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer
 	}, nil
 }
 
+// Subscribe registers handler with a message.Router; see message.Router.Subscribe
+// for its errors. Subscribe every handler before Run starts: a record whose
+// Kind has no handler fails at StageUnhandled.
 func (c *Consumer) Subscribe(handler message.Handler) error {
 	return c.router.Subscribe(handler)
 }
 
+// Close closes the franz-go client when WithCloseClient(true) was set, and
+// does nothing otherwise. Call it after Run has returned.
 func (c *Consumer) Close() {
 	if c.cfg.closeClient && c.client != nil {
 		c.client.Close()
 	}
 }
 
+// Run consumes records until ctx ends, then returns nil. It returns an error
+// when the consumer cannot continue: ErrNilClient, a poll error with no
+// records, an error matching ErrCommitFailed, or, under
+// FailurePublishFallbackStop, one matching ErrRetryPublishFailed or
+// ErrDLQPublishFailed. Run handles one record at a time on the calling
+// goroutine; call it from one goroutine only.
 func (c *Consumer) Run(ctx context.Context) error {
 	err := c.run(ctx)
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {

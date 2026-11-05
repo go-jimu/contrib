@@ -16,6 +16,8 @@ type schedulerRuntime interface {
 }
 
 // Scheduler adapts asynq periodic task scheduling to taskqueue periodic tasks.
+// It implements taskqueue.PeriodicTaskScheduler and taskqueue.Runner. Every
+// running Scheduler enqueues on every fire; run one per deployment.
 type Scheduler struct {
 	runtime schedulerRuntime
 
@@ -49,7 +51,10 @@ func newScheduler(runtime schedulerRuntime) *Scheduler {
 	}
 }
 
-// RegisterPeriodicTask registers one periodic task producer.
+// RegisterPeriodicTask registers one periodic task producer, before or after
+// Start. It returns the error of periodic.Validate, ErrNilScheduler,
+// taskqueue.ErrDuplicatePeriodicTask for a name already registered on this
+// Scheduler, or the asynq registration error.
 func (s *Scheduler) RegisterPeriodicTask(periodic taskqueue.PeriodicTask) error {
 	if err := periodic.Validate(); err != nil {
 		return err
@@ -80,7 +85,9 @@ func (s *Scheduler) RegisterPeriodicTask(periodic taskqueue.PeriodicTask) error 
 	return nil
 }
 
-// Start starts the underlying asynq scheduler.
+// Start starts the underlying asynq scheduler. It returns ctx.Err() if ctx is
+// already done, ErrNilScheduler, or the asynq error for a scheduler that is
+// already running or was shut down.
 func (s *Scheduler) Start(ctx context.Context) error {
 	if s.runtime == nil {
 		return ErrNilScheduler
@@ -110,7 +117,8 @@ func (s *Scheduler) Shutdown(ctx context.Context) error {
 	}
 }
 
-// Run starts the scheduler until ctx is canceled, then shuts it down.
+// Run starts the scheduler, blocks until ctx ends, then shuts it down and
+// returns nil. It returns an error only when the scheduler cannot start.
 func (s *Scheduler) Run(ctx context.Context) error {
 	if s.runtime == nil {
 		return ErrNilScheduler
