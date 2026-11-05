@@ -28,7 +28,8 @@ type ErrorHandler func(context.Context, Error) error
 
 // ErrorObserver observes provider failures without controlling consumer flow,
 // for logging and metrics. It runs on the Run goroutine for every failure,
-// including failures the policy then drops, so keep it fast.
+// including failures the policy then drops, so keep it fast. A message-level
+// failure after Run's ctx ended is left for redelivery and not observed.
 type ErrorObserver func(context.Context, Error)
 
 // FailureTopicResolver resolves the retry or DLQ topic for a failed source record.

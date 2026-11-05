@@ -89,8 +89,10 @@ func (c *Consumer) Close() {
 // when the consumer cannot continue: ErrNilClient, a poll error with no
 // records, an error matching ErrCommitFailed, or, under
 // FailurePublishFallbackStop, one matching ErrRetryPublishFailed or
-// ErrDLQPublishFailed. Run handles one record at a time on the calling
-// goroutine; call it from one goroutine only.
+// ErrDLQPublishFailed. A message-level failure after ctx ended skips the
+// FailurePolicy and leaves the record uncommitted for redelivery. Run handles
+// one record at a time on the calling goroutine; call it from one goroutine
+// only.
 func (c *Consumer) Run(ctx context.Context) error {
 	err := c.run(ctx)
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
@@ -180,6 +182,12 @@ func (c *Consumer) handle(ctx context.Context, msg message.Message) (err error) 
 }
 
 func (c *Consumer) handleFailure(ctx context.Context, failure Error) error {
+	// Once Run's ctx has ended, leave the record undecided and uncommitted so
+	// Kafka redelivers it: the failure may stem from the ended ctx, and any
+	// publish or commit would run on it. Run treats the ctx error as shutdown.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.observe(ctx, failure)
 	decision := failureAction(ctx, failure, c.failurePolicy, c.cfg)
 	if decision.err != nil {

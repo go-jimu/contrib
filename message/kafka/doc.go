@@ -118,13 +118,11 @@
 // is at least once, so make handlers idempotent, for example keyed by
 // Message.ID.
 //
-// When ctx ends, Run returns nil. A handler that fails because ctx ended goes
-// through the FailurePolicy like any other failure, and the publish and commit
-// that follow run on the ended ctx: the record is either committed after that
-// outcome or redelivered later. Under DropAndCommitPolicy it can be committed
-// unhandled, so finish or return nil from handlers that are cut short. Run
-// lists the errors that stop it early; treat them as fatal and stop or
-// restart the process.
+// When ctx ends, Run returns nil. A failure that happens after ctx ended,
+// such as a handler cut short by shutdown, skips the FailurePolicy and the
+// ErrorObserver: Run stops and leaves the record uncommitted, so Kafka
+// redelivers it and the next run decides it. Run lists the errors that stop
+// it early; treat them as fatal and stop or restart the process.
 //
 // Shut down in this order: cancel Run's ctx, wait for Run to return, then close
 // the client after every publisher sharing it has stopped. Consumer.Close
