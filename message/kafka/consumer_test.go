@@ -313,14 +313,14 @@ func TestConsumerProcessRecordReturnsCommitErrorWhenObserverRecordsFailure(t *te
 // Intent: Close should only close the franz-go client when ownership was explicitly transferred to the consumer.
 func TestConsumerCloseHonorsClientOwnership(t *testing.T) {
 	client := &fakeConsumerClient{}
-	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), defaultConfig())
+	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), testConsumerConfig())
 
 	consumer.Close()
 	if client.closed {
 		t.Fatal("client closed by default, want open")
 	}
 
-	cfg := defaultConfig()
+	cfg := testConsumerConfig()
 	WithCloseClient(true)(&cfg)
 	ownedClient := &fakeConsumerClient{}
 	ownedConsumer := newConsumerForTest(t, ownedClient, DropAndCommitPolicy(), cfg)
@@ -332,7 +332,7 @@ func TestConsumerCloseHonorsClientOwnership(t *testing.T) {
 
 // Intent: constructing a consumer with a nil franz-go client should fail record processing without a typed-nil panic.
 func TestNewConsumerNilClientProcessRecordReturnsErrNilClient(t *testing.T) {
-	consumer, err := NewConsumer(nil, DropAndCommitPolicy())
+	consumer, err := NewConsumer(nil, DropAndCommitPolicy(), WithPayloadResolver(message.NewPayloadRegistry()))
 	if err != nil {
 		t.Fatalf("NewConsumer returned error: %v", err)
 	}

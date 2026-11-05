@@ -30,9 +30,9 @@
 // and has no Close. Hand publisher, registry, and consumer (as a
 // message.Subscriber) to the bounded contexts. Before Run starts, each context
 // registers a payload factory for every Kind it consumes and subscribes its
-// handlers. A record decodes only when its Kind is registered: a consumer
-// without WithPayloadResolver fails every record at StageDecode with
-// ErrNoPayloadResolver, and an unregistered Kind fails with
+// handlers. NewConsumer requires WithPayloadResolver and returns
+// ErrNoPayloadResolver without it. A record decodes only when its Kind is
+// registered; an unregistered Kind fails at StageDecode with
 // message.ErrUnknownKind.
 //
 // kgo.ConsumeTopics fixes the topics when the client is built, so list the

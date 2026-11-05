@@ -33,11 +33,12 @@ type Consumer struct {
 
 // NewConsumer returns a Consumer for client, which must be configured with
 // kgo.ConsumerGroup, kgo.ConsumeTopics, and kgo.DisableAutoCommit. policy
-// decides message-level failures. Pass WithPayloadResolver to decode payloads,
-// and failure topic options when policy retries or uses DLQ.
+// decides message-level failures. WithPayloadResolver is required to decode
+// payloads; pass failure topic options too when policy retries or uses DLQ.
 //
-// It returns ErrNilFailurePolicy for a nil policy. A nil client is reported
-// later, by Run, as ErrNilClient. NewConsumer starts nothing.
+// It returns ErrNilFailurePolicy for a nil policy and ErrNoPayloadResolver
+// without WithPayloadResolver. A nil client is reported later, by Run, as
+// ErrNilClient. NewConsumer starts nothing.
 func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Consumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -56,6 +57,9 @@ func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Con
 func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer, error) {
 	if policy == nil {
 		return nil, ErrNilFailurePolicy
+	}
+	if cfg.payloadResolver == nil {
+		return nil, ErrNoPayloadResolver
 	}
 	return &Consumer{
 		client:        client,

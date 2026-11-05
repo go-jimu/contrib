@@ -31,6 +31,27 @@ func TestNewConsumerRejectsNilFailurePolicy(t *testing.T) {
 	}
 }
 
+// Intent: a consumer cannot decode any record without a payload resolver, so
+// constructing one without it fails fast instead of failing every record at
+// StageDecode, which DropAndCommitPolicy would silently commit.
+func TestNewConsumerRejectsMissingPayloadResolver(t *testing.T) {
+	for name, opts := range map[string][]Option{
+		"no option":  nil,
+		"nil option": {WithPayloadResolver(nil)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			consumer, err := NewConsumer(nil, DropAndCommitPolicy(), opts...)
+
+			if !errors.Is(err, ErrNoPayloadResolver) {
+				t.Fatalf("NewConsumer error = %v, want %v", err, ErrNoPayloadResolver)
+			}
+			if consumer != nil {
+				t.Fatalf("consumer = %#v, want nil", consumer)
+			}
+		})
+	}
+}
+
 // Intent: a drop policy must treat handler errors as message-level failures, commit the failed source, and keep the run loop alive for later records.
 func TestConsumerRunContinuesAfterHandlerFailureWithDropPolicy(t *testing.T) {
 	cfg := testConsumerConfig()

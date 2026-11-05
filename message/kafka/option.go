@@ -93,7 +93,6 @@ func defaultConfig() config {
 		topicResolver:       defaultTopicResolver,
 		kindResolver:        defaultKindResolver(defaultHeaderNames()),
 		defaultKindResolver: true,
-		payloadResolver:     defaultPayloadResolver,
 		failureFallback:     FailurePublishFallbackStop,
 		publishRetry:        publishRetryConfig{maxAttempts: 1, sleep: sleepContext},
 		headerNames:         defaultHeaderNames(),
@@ -131,10 +130,6 @@ func defaultKindResolver(headers HeaderNames) KindResolver {
 		return "", ErrNoKind
 	}
 }
-
-var defaultPayloadResolver PayloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
-	return nil, ErrNoPayloadResolver
-})
 
 // Deprecated: use RetryThenDLQPolicy with NewConsumer.
 func defaultRetryPolicy() RetryPolicy {
@@ -221,8 +216,8 @@ func WithKindResolver(resolver KindResolver) Option {
 }
 
 // WithPayloadResolver sets the consumer's payload resolver, usually a
-// *message.PayloadRegistry. It is required to consume: without it every record
-// fails at StageDecode with ErrNoPayloadResolver. A nil resolver is ignored.
+// *message.PayloadRegistry. NewConsumer requires it and returns
+// ErrNoPayloadResolver without it. A nil resolver is ignored.
 func WithPayloadResolver(resolver PayloadResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {

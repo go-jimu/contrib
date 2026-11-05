@@ -63,8 +63,8 @@ var (
 	// ErrNoKind means a consumed record has no message kind header, or the
 	// KindResolver returned "". The record fails at StageDecode.
 	ErrNoKind = errors.New("message kind is empty")
-	// ErrNoPayloadResolver means the consumer has no WithPayloadResolver, so
-	// every record fails at StageDecode.
+	// ErrNoPayloadResolver means NewConsumer was called without
+	// WithPayloadResolver.
 	ErrNoPayloadResolver = errors.New("payload resolver is not configured")
 	// ErrUnhandledMessage is not returned by this version; an unhandled kind
 	// fails at StageUnhandled with message.ErrUnhandledKind.
