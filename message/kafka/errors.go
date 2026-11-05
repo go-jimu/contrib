@@ -26,23 +26,33 @@ const (
 	// StageHandle is an error returned by a message.Handler, or a handler
 	// panic recovered as a *PanicError. It is a message-level failure.
 	StageHandle Stage = "handle"
-	// StageRetryPublish is a failure to resolve or publish the retry record.
-	StageRetryPublish Stage = "retry_publish"
-	// StageDLQPublish is a failure to resolve or publish the DLQ record.
-	StageDLQPublish Stage = "dlq_publish"
+	// StageRecover is an error returned by the Recoverer for a record the
+	// FailurePolicy dropped; Err matches ErrRecoverFailed. The record stays
+	// uncommitted and the Recoverer is called again after a backoff.
+	StageRecover Stage = "recover"
 	// StageCommit is a failure to commit the source offset.
 	StageCommit Stage = "commit"
 )
 
-// Error describes one consumer failure for a FailurePolicy and an
-// ErrorObserver. Record is the source record, nil for StagePoll; Message is
-// the decoded message, zero before decoding succeeds; Err is the cause. Error
-// is a value passed to callbacks and does not implement the error interface.
+// Error describes one consumer failure for a FailurePolicy, a Recoverer, and
+// an ErrorObserver. Record is the source record, nil for StagePoll; Message is
+// the decoded message, zero before decoding succeeds; Err is the cause.
+//
+// Attempt counts the failed attempts at this record, starting at 1: for the
+// Consumer, attempts since this process started handling the record at the
+// head of its partition; for the ShareConsumer, the broker's delivery count.
+// Final reports that no further attempt follows: the policy chose to drop the
+// record or stop. The FailurePolicy sees Final false, as it decides it.
+//
+// Error is a value passed to callbacks and does not implement the error
+// interface.
 type Error struct {
 	Stage   Stage
 	Record  *kgo.Record
 	Message message.Message
 	Err     error
+	Attempt int
+	Final   bool
 }
 
 // Errors returned by this package. Compare with errors.Is: they are often
@@ -58,8 +68,7 @@ var (
 	// ErrNilPayload means Publish received a message without a payload, or a
 	// payload resolver returned nil.
 	ErrNilPayload = errors.New("message payload is nil")
-	// ErrNoTopic means a topic resolver returned "" or no retry or DLQ topic
-	// resolver is configured for the action the policy chose.
+	// ErrNoTopic means a topic resolver returned "".
 	ErrNoTopic = errors.New("kafka topic is empty")
 	// ErrNoKind means a consumed record has no message kind header, or the
 	// KindResolver returned "". The record fails at StageDecode.
@@ -72,12 +81,20 @@ var (
 	ErrUnhandledMessage = errors.New("message is unhandled")
 	// ErrNilFailurePolicy means NewConsumer received a nil FailurePolicy.
 	ErrNilFailurePolicy = errors.New("kafka failure policy is nil")
-	// ErrRetryPublishFailed wraps a failure to resolve or publish a retry
-	// record. Run returns it under FailurePublishFallbackStop.
-	ErrRetryPublishFailed = errors.New("retry publish failed")
-	// ErrDLQPublishFailed wraps a failure to resolve or publish a DLQ record.
-	// Run returns it under FailurePublishFallbackStop.
-	ErrDLQPublishFailed = errors.New("dlq publish failed")
+	// ErrInvalidClient means NewConsumer or NewShareConsumer received a
+	// client without the options it requires; the error names them.
+	ErrInvalidClient = errors.New("kafka client is not configured for this consumer")
+	// ErrStopped wraps the failure for which the FailurePolicy chose
+	// FailureActionStop. Run returns it.
+	ErrStopped = errors.New("consumer stopped by failure policy")
+	// ErrHandlerTimeout means a handler did not return within the
+	// WithHandlerTimeout duration. It is a StageHandle failure.
+	ErrHandlerTimeout = errors.New("message handler timed out")
+	// ErrNonRetryable matches an error wrapped with NonRetryable: a failure a
+	// retry cannot fix. The built-in policies do not retry it.
+	ErrNonRetryable = errors.New("non-retryable failure")
+	// ErrRecoverFailed wraps an error returned by the Recoverer.
+	ErrRecoverFailed = errors.New("recover failed")
 	// ErrCommitFailed wraps an offset commit failure. Run returns it.
 	ErrCommitFailed = errors.New("commit failed")
 	// ErrHandlerPanic matches a *PanicError: a handler panicked and the
@@ -89,7 +106,7 @@ var (
 // Value is what the handler passed to panic and Stack the goroutine stack at
 // the panic; read them with errors.As, for example to log the stack in an
 // ErrorObserver. It matches ErrHandlerPanic and, when Value is an error, that
-// error too. Error omits the stack, so retry and DLQ headers stay small.
+// error too. Error omits the stack.
 type PanicError struct {
 	Value any
 	Stack []byte
@@ -106,4 +123,28 @@ func (e *PanicError) Unwrap() []error {
 		return []error{ErrHandlerPanic, err}
 	}
 	return []error{ErrHandlerPanic}
+}
+
+// NonRetryable marks err as a failure a retry cannot fix, such as invalid
+// input or a missing entity. The result matches ErrNonRetryable and err with
+// errors.Is. A handler returns it so that RetryPolicy goes straight to its
+// exhausted action and the ShareConsumer rejects the record. NonRetryable(nil)
+// returns nil.
+func NonRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &nonRetryableError{err: err}
+}
+
+type nonRetryableError struct {
+	err error
+}
+
+func (e *nonRetryableError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableError) Unwrap() []error {
+	return []error{ErrNonRetryable, e.err}
 }

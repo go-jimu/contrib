@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/go-jimu/contrib/message/kafka"
@@ -14,42 +14,45 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// ExampleRetryThenDLQPolicy shows the outcome for each handler attempt of one
-// record: the jimu-retry-attempt header counts the attempts already made.
-func ExampleRetryThenDLQPolicy() {
-	policy := kafka.RetryThenDLQPolicy(kafka.RetryThenDLQConfig{MaxAttempts: 3})
+// ExampleRetryPolicy shows the decision for each attempt at one record, and
+// for failures a retry cannot fix.
+func ExampleRetryPolicy() {
+	policy := kafka.RetryPolicy(kafka.RetryConfig{MaxAttempts: 3})
 	names := map[kafka.FailureAction]string{
 		kafka.FailureActionDrop:  "drop",
 		kafka.FailureActionRetry: "retry",
-		kafka.FailureActionDLQ:   "dlq",
+		kafka.FailureActionStop:  "stop",
 	}
 
-	for attempt := range 3 {
-		record := &kgo.Record{Topic: "orders.paid"}
-		if attempt > 0 {
-			record.Topic = "orders.paid.retry"
-			record.Headers = []kgo.RecordHeader{{Key: "jimu-retry-attempt", Value: []byte(strconv.Itoa(attempt))}}
-		}
+	for attempt := 1; attempt <= 3; attempt++ {
 		action := policy.Decide(context.Background(), kafka.Error{
-			Stage:  kafka.StageHandle,
-			Record: record,
-			Err:    errors.New("database unavailable"),
+			Stage:   kafka.StageHandle,
+			Err:     errors.New("database unavailable"),
+			Attempt: attempt,
 		})
-		fmt.Println("handler attempt", attempt+1, "->", names[action])
+		fmt.Println("attempt", attempt, "->", names[action])
 	}
+
+	permanent := policy.Decide(context.Background(), kafka.Error{
+		Stage:   kafka.StageHandle,
+		Err:     kafka.NonRetryable(errors.New("order does not exist")),
+		Attempt: 1,
+	})
+	fmt.Println("non-retryable ->", names[permanent])
 
 	decode := policy.Decide(context.Background(), kafka.Error{
-		Stage:  kafka.StageDecode,
-		Record: &kgo.Record{Topic: "orders.paid"},
-		Err:    message.ErrUnknownKind,
+		Stage:   kafka.StageDecode,
+		Err:     message.ErrUnknownKind,
+		Attempt: 1,
 	})
 	fmt.Println("decode failure ->", names[decode])
 
 	// Output:
-	// handler attempt 1 -> retry
-	// handler attempt 2 -> retry
-	// handler attempt 3 -> dlq
-	// decode failure -> dlq
+	// attempt 1 -> retry
+	// attempt 2 -> retry
+	// attempt 3 -> drop
+	// non-retryable -> drop
+	// decode failure -> drop
 }
 
 // customerCreated is a message.Handler owned by a bounded context. It depends
@@ -76,9 +79,9 @@ func ExampleNewConsumer() {
 	client, err := kafka.NewClient(
 		kgo.SeedBrokers("localhost:9092"),
 		kgo.ConsumerGroup("customers-service"),
-		// RetryThenDLQPolicy needs the retry topic consumed too.
-		kgo.ConsumeTopics(string(kind), string(kind)+".retry"),
-		kgo.DisableAutoCommit(),
+		kgo.ConsumeTopics(string(kind)),
+		kgo.DisableAutoCommit(),    // the consumer commits
+		kgo.BlockRebalanceOnPoll(), // no rebalance while a batch is handled
 	)
 	if err != nil {
 		panic(err)
@@ -88,12 +91,13 @@ func ExampleNewConsumer() {
 	registry := message.NewPayloadRegistry()
 	consumer, err := kafka.NewConsumer(
 		client,
-		kafka.RetryThenDLQPolicy(kafka.RetryThenDLQConfig{MaxAttempts: 3}),
+		kafka.RetryPolicy(kafka.RetryConfig{MaxAttempts: 5}),
 		kafka.WithPayloadResolver(registry),
-		kafka.WithDefaultFailureTopics(),
+		kafka.WithHandlerTimeout(30*time.Second),
 		kafka.WithErrorObserver(func(ctx context.Context, failure kafka.Error) {
 			slog.ErrorContext(ctx, "kafka message failed",
-				slog.String("stage", string(failure.Stage)), slog.Any("error", failure.Err))
+				slog.String("stage", string(failure.Stage)), slog.Int("attempt", failure.Attempt),
+				slog.Bool("final", failure.Final), slog.Any("error", failure.Err))
 		}),
 	)
 	if err != nil {

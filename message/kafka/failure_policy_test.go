@@ -3,164 +3,84 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-jimu/components/ddd/message"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-func newConsumerForTest(t *testing.T, client pollClient, policy FailurePolicy, cfg config) *Consumer {
-	t.Helper()
-
-	consumer, err := newConsumer(client, policy, cfg)
-	if err != nil {
-		t.Fatalf("newConsumer returned error: %v", err)
+// Intent (A9): the default classification retries only failures a retry can
+// fix, and MaxAttempts counts every attempt: below it retries, at it gives up.
+func TestRetryPolicyDecisionTable(t *testing.T) {
+	transient := errors.New("database unavailable")
+	tests := []struct {
+		name    string
+		cfg     RetryConfig
+		failure Error
+		want    FailureAction
+	}{
+		{"handler error, first attempt", RetryConfig{}, Error{Stage: StageHandle, Err: transient, Attempt: 1}, FailureActionRetry},
+		{"handler error, below max", RetryConfig{}, Error{Stage: StageHandle, Err: transient, Attempt: 2}, FailureActionRetry},
+		{"handler error, at default max 3", RetryConfig{}, Error{Stage: StageHandle, Err: transient, Attempt: 3}, FailureActionDrop},
+		{"handler timeout retries", RetryConfig{}, Error{Stage: StageHandle, Err: fmt.Errorf("%w after 1s", ErrHandlerTimeout), Attempt: 1}, FailureActionRetry},
+		{"handler panic retries", RetryConfig{}, Error{Stage: StageHandle, Err: &PanicError{Value: "boom"}, Attempt: 1}, FailureActionRetry},
+		{"non-retryable handler error", RetryConfig{}, Error{Stage: StageHandle, Err: NonRetryable(transient), Attempt: 1}, FailureActionDrop},
+		{"decode failure", RetryConfig{}, Error{Stage: StageDecode, Err: ErrNoKind, Attempt: 1}, FailureActionDrop},
+		{"unhandled kind", RetryConfig{}, Error{Stage: StageUnhandled, Err: message.ErrUnhandledKind, Attempt: 1}, FailureActionDrop},
+		{"exhausted with stop", RetryConfig{MaxAttempts: 2, OnExhausted: FailureActionStop}, Error{Stage: StageHandle, Err: transient, Attempt: 2}, FailureActionStop},
+		{"non-retryable with stop", RetryConfig{OnExhausted: FailureActionStop}, Error{Stage: StageDecode, Err: ErrNoKind, Attempt: 1}, FailureActionStop},
+		{"OnExhausted retry counts as drop", RetryConfig{MaxAttempts: 1, OnExhausted: FailureActionRetry}, Error{Stage: StageHandle, Err: transient, Attempt: 1}, FailureActionDrop},
+		{"custom retryable", RetryConfig{Retryable: func(Error) bool { return true }}, Error{Stage: StageDecode, Err: ErrNoKind, Attempt: 1}, FailureActionRetry},
 	}
-	return consumer
-}
-
-// Intent: constructing a consumer without a failure policy should fail fast so message-level failures never inherit an accidental runtime-stop default.
-func TestNewConsumerRejectsNilFailurePolicy(t *testing.T) {
-	consumer, err := NewConsumer(nil, nil)
-
-	if !errors.Is(err, ErrNilFailurePolicy) {
-		t.Fatalf("NewConsumer error = %v, want %v", err, ErrNilFailurePolicy)
-	}
-	if consumer != nil {
-		t.Fatalf("consumer = %#v, want nil", consumer)
-	}
-}
-
-// Intent: a consumer cannot decode any record without a payload resolver, so
-// constructing one without it fails fast instead of failing every record at
-// StageDecode, which DropAndCommitPolicy would silently commit.
-func TestNewConsumerRejectsMissingPayloadResolver(t *testing.T) {
-	for name, opts := range map[string][]Option{
-		"no option":  nil,
-		"nil option": {WithPayloadResolver(nil)},
-	} {
-		t.Run(name, func(t *testing.T) {
-			consumer, err := NewConsumer(nil, DropAndCommitPolicy(), opts...)
-
-			if !errors.Is(err, ErrNoPayloadResolver) {
-				t.Fatalf("NewConsumer error = %v, want %v", err, ErrNoPayloadResolver)
-			}
-			if consumer != nil {
-				t.Fatalf("consumer = %#v, want nil", consumer)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RetryPolicy(tt.cfg).Decide(context.Background(), tt.failure); got != tt.want {
+				t.Fatalf("Decide = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// Intent: a drop policy must treat handler errors as message-level failures, commit the failed source, and keep the run loop alive for later records.
-func TestConsumerRunContinuesAfterHandlerFailureWithDropPolicy(t *testing.T) {
-	cfg := testConsumerConfig()
-	var observed []Error
-	WithErrorObserver(func(_ context.Context, failure Error) {
-		if failure.Stage != StagePoll {
-			observed = append(observed, failure)
+// Intent: DropAndCommitPolicy never retries.
+func TestDropAndCommitPolicyDrops(t *testing.T) {
+	got := DropAndCommitPolicy().Decide(context.Background(), Error{Stage: StageHandle, Err: errors.New("x"), Attempt: 1})
+	if got != FailureActionDrop {
+		t.Fatalf("Decide = %v, want drop", got)
+	}
+}
+
+// Intent: the default backoff starts at 1s, doubles, and caps at 1 minute
+// without overflowing for large attempts.
+func TestDefaultRetryBackoff(t *testing.T) {
+	tests := map[int]time.Duration{
+		0:    time.Second,
+		1:    time.Second,
+		2:    2 * time.Second,
+		3:    4 * time.Second,
+		6:    32 * time.Second,
+		7:    time.Minute, // 64s is capped
+		8:    time.Minute,
+		1000: time.Minute,
+	}
+	for attempt, want := range tests {
+		if got := DefaultRetryBackoff(attempt); got != want {
+			t.Errorf("DefaultRetryBackoff(%d) = %v, want %v", attempt, got, want)
 		}
-	})(&cfg)
-	failedRecord := testRecord(t, cfg, "order.payment.v1.OrderPaid")
-	nextRecord := testRecord(t, cfg, "order.payment.v1.OrderPaid")
-	client := &fakeConsumerClient{fetches: []kgo.Fetches{
-		fetchRecords(failedRecord),
-		fetchRecords(nextRecord),
-		fetchError(context.Canceled),
-	}}
-	consumer := newConsumerForTest(t, client, DropAndCommitPolicy(), cfg)
-	handlerErr := errors.New("handler failed")
-	handler := &testHandler{
-		kinds: []message.Kind{"order.payment.v1.OrderPaid"},
-		errs:  []error{handlerErr, nil},
-	}
-	if err := consumer.Subscribe(handler); err != nil {
-		t.Fatalf("Subscribe returned error: %v", err)
-	}
-
-	err := consumer.Run(context.Background())
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
-	}
-	if len(handler.seen) != 2 {
-		t.Fatalf("handler saw %d messages, want 2", len(handler.seen))
-	}
-	if len(client.records) != 0 {
-		t.Fatalf("produced failure records = %d, want 0", len(client.records))
-	}
-	if len(client.committed) != 2 || client.committed[0] != failedRecord || client.committed[1] != nextRecord {
-		t.Fatalf("committed records = %#v, want failed then next source records", client.committed)
-	}
-	if len(observed) != 1 {
-		t.Fatalf("observed failures = %d, want 1", len(observed))
-	}
-	if observed[0].Stage != StageHandle || !errors.Is(observed[0].Err, handlerErr) {
-		t.Fatalf("observed failure = %#v, want handle stage with handler error", observed[0])
 	}
 }
 
-// Intent: retry/DLQ policy should make failure handling explicit and continue the run loop after a retry handoff succeeds.
-func TestConsumerRunContinuesAfterRetryHandoff(t *testing.T) {
-	cfg := testConsumerConfig()
-	WithDefaultFailureTopics()(&cfg)
-	failedRecord := testRecord(t, cfg, "order.payment.v1.OrderPaid")
-	nextRecord := testRecord(t, cfg, "order.payment.v1.OrderPaid")
-	client := &fakeConsumerClient{fetches: []kgo.Fetches{
-		fetchRecords(failedRecord),
-		fetchRecords(nextRecord),
-		fetchError(context.Canceled),
-	}}
-	consumer := newConsumerForTest(t, client, RetryThenDLQPolicy(RetryThenDLQConfig{MaxAttempts: 3}), cfg)
-	if err := consumer.Subscribe(&testHandler{
-		kinds: []message.Kind{"order.payment.v1.OrderPaid"},
-		errs:  []error{errors.New("temporary handler failure"), nil},
-	}); err != nil {
-		t.Fatalf("Subscribe returned error: %v", err)
+// Intent: NonRetryable marks an error without hiding it.
+func TestNonRetryable(t *testing.T) {
+	if NonRetryable(nil) != nil {
+		t.Fatal("NonRetryable(nil) != nil")
 	}
-
-	err := consumer.Run(context.Background())
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want %v", err, context.Canceled)
+	cause := errors.New("order does not exist")
+	err := NonRetryable(cause)
+	if !errors.Is(err, ErrNonRetryable) || !errors.Is(err, cause) {
+		t.Fatalf("%v does not match ErrNonRetryable and its cause", err)
 	}
-	if len(client.records) != 1 {
-		t.Fatalf("produced failure records = %d, want 1", len(client.records))
-	}
-	if client.records[0].Topic != "orders.retry" {
-		t.Fatalf("retry topic = %q, want orders.retry", client.records[0].Topic)
-	}
-	if len(client.committed) != 2 || client.committed[0] != failedRecord || client.committed[1] != nextRecord {
-		t.Fatalf("committed records = %#v, want failed then next source records", client.committed)
-	}
-}
-
-// Intent: a record consumed from a retry topic should route further retry/DLQ handoff by original topic metadata, avoiding chained topics such as orders.retry.retry.
-func TestFailureTopicResolversUseOriginalTopicHeader(t *testing.T) {
-	cfg := defaultConfig()
-	WithDefaultFailureTopics()(&cfg)
-	record := &kgo.Record{
-		Topic: "orders.retry",
-		Headers: []kgo.RecordHeader{
-			{Key: headerOriginalTopic, Value: []byte("orders")},
-			{Key: headerRetryAttempt, Value: []byte("1")},
-		},
-	}
-	failure := Error{Stage: StageHandle, Record: record, Err: errors.New("handler failed")}
-
-	retryTopic, retryErr := cfg.retryTopicResolver(failure)
-	dlqTopic, dlqErr := cfg.dlqTopicResolver(failure)
-
-	if retryErr != nil {
-		t.Fatalf("retry topic resolver returned error: %v", retryErr)
-	}
-	if retryTopic != "orders.retry" {
-		t.Fatalf("retry topic = %q, want orders.retry", retryTopic)
-	}
-	if dlqErr != nil {
-		t.Fatalf("dlq topic resolver returned error: %v", dlqErr)
-	}
-	if dlqTopic != "orders.dlq" {
-		t.Fatalf("dlq topic = %q, want orders.dlq", dlqTopic)
+	if err.Error() != cause.Error() {
+		t.Fatalf("Error() = %q, want %q", err.Error(), cause.Error())
 	}
 }
