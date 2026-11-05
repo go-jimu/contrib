@@ -120,7 +120,8 @@ func run(ctx context.Context) error {
 		client,
 		kafka.RetryPolicy(kafka.RetryConfig{}),
 		kafka.WithPayloadResolver(registry),
-		kafka.WithHandlerTimeout(30*time.Second),
+		kafka.WithHandlerTimeout(5*time.Second),
+		kafka.WithMaxPollRecords(10), // 10 × 5s stays below kgo's 60s RebalanceTimeout
 	)
 	if err != nil {
 		return err
@@ -173,6 +174,7 @@ client, err := kafka.NewClient(
 	kgo.SeedBrokers("localhost:9092"),
 	kgo.ShareGroup("notifications-service"),
 	kgo.ConsumeTopics("orders.v1.OrderPaidV1"),
+	kgo.ShareMaxRecords(16), // about the concurrency below
 )
 
 consumer, err := kafka.NewShareConsumer(
@@ -180,9 +182,12 @@ consumer, err := kafka.NewShareConsumer(
 	kafka.ReleaseOrRejectPolicy(),
 	kafka.WithPayloadResolver(registry),
 	kafka.WithConcurrency(16),
-	kafka.WithHandlerTimeout(20*time.Second), // below the 30s acquisition lock
+	kafka.WithHandlerTimeout(20*time.Second), // well within the 30s record lock
 )
 ```
+
+Keep the client's share fetches about as large as the concurrency, for example
+`kgo.ShareMaxRecords(16)`: a record waiting in the client is already locked.
 
 ## Publisher Retry
 

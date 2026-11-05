@@ -93,7 +93,8 @@ func ExampleNewConsumer() {
 		client,
 		kafka.RetryPolicy(kafka.RetryConfig{MaxAttempts: 5}),
 		kafka.WithPayloadResolver(registry),
-		kafka.WithHandlerTimeout(30*time.Second),
+		kafka.WithHandlerTimeout(5*time.Second),
+		kafka.WithMaxPollRecords(10), // 10 × 5s stays below kgo's 60s RebalanceTimeout
 		kafka.WithErrorObserver(func(ctx context.Context, failure kafka.Error) {
 			slog.ErrorContext(ctx, "kafka message failed",
 				slog.String("stage", string(failure.Stage)), slog.Int("attempt", failure.Attempt),

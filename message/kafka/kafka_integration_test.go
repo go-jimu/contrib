@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -276,8 +277,10 @@ func publishN(t *testing.T, publisher message.Publisher, kind message.Kind, ids 
 }
 
 // Intent (I1): a member joining mid-stream triggers a rebalance while records
-// are being handled; neither Run fails (no commit for a revoked partition),
-// and every message is handled at least once.
+// are being handled, some of them retried in place (paused and rewound);
+// neither Run fails (no commit for a revoked partition), every message is
+// handled at least once, and the committed offsets cover them all: a fresh
+// member of the group gets nothing.
 func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 	brokers := startKafka(t)
 	topic := uniqueIntegrationName("rebalance")
@@ -287,6 +290,7 @@ func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 	const total = 80
 	var mu sync.Mutex
 	seen := map[string]bool{}
+	failedOnce := map[string]bool{}
 	handledBy := map[string]int{}
 	newMember := func(name string) (*Consumer, *observed) {
 		client := newIntegrationClient(t, brokers, group, topic)
@@ -297,6 +301,7 @@ func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 			// Small batches, so the rebalance is not held until member a
 			// has handled everything.
 			WithMaxPollRecords(8),
+			WithRetryBackoff(func(int) time.Duration { return 200 * time.Millisecond }),
 		)
 		if err != nil {
 			t.Fatalf("new consumer %s: %v", name, err)
@@ -310,9 +315,15 @@ func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 					return ctx.Err()
 				}
 				mu.Lock()
+				defer mu.Unlock()
+				// Every tenth message fails once, so partitions are paused
+				// and rewound while the group rebalances.
+				if strings.HasSuffix(msg.ID(), "0") && !failedOnce[msg.ID()] {
+					failedOnce[msg.ID()] = true
+					return errors.New("transient failure")
+				}
 				seen[msg.ID()] = true
 				handledBy[name]++
-				mu.Unlock()
 				return nil
 			},
 		}); err != nil {
@@ -363,6 +374,22 @@ func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 	}
 	if _, by := count(); by["b"] == 0 {
 		t.Fatalf("member b handled nothing (%v); the rebalance did not happen mid-stream", by)
+	}
+	if len(failedOnce) != total/10 {
+		t.Fatalf("retried %d messages, want %d", len(failedOnce), total/10)
+	}
+
+	// Every offset must be committed: a fresh member resumes past them all.
+	fresh := newIntegrationClient(t, brokers, group, topic)
+	pollCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for pollCtx.Err() == nil {
+		fetches := fresh.PollRecords(pollCtx, 100)
+		if n := len(fetches.Records()); n > 0 {
+			t.Fatalf("fresh member got %d records (first %s@%d); offsets were not committed past them",
+				n, fetches.Records()[0].Topic, fetches.Records()[0].Offset)
+		}
+		fresh.AllowRebalance()
 	}
 }
 
@@ -508,7 +535,7 @@ func TestIntegrationShareConsumerReleaseAndReject(t *testing.T) {
 			switch {
 			case msg.ID() == "reject":
 				return NonRetryable(errors.New("bad input"))
-			case n == 1:
+			case n <= 2:
 				return errors.New("database unavailable")
 			default:
 				close(retried)
@@ -537,17 +564,26 @@ func TestIntegrationShareConsumerReleaseAndReject(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls["retry"] != 2 || calls["reject"] != 1 {
-		t.Fatalf("handler calls = %v, want retry 2, reject 1", calls)
+	if calls["retry"] != 3 || calls["reject"] != 1 {
+		t.Fatalf("handler calls = %v, want retry 3, reject 1", calls)
 	}
-	byID := map[string]Error{}
+	var retryAttempts []int
+	var reject []Error
 	for _, f := range obs.stage(StageHandle) {
-		byID[f.Message.ID()] = f
+		switch f.Message.ID() {
+		case "retry":
+			if f.Final {
+				t.Fatalf("retry failure at attempt %d is final, want not final below the delivery limit", f.Attempt)
+			}
+			retryAttempts = append(retryAttempts, f.Attempt)
+		case "reject":
+			reject = append(reject, f)
+		}
 	}
-	if f := byID["retry"]; f.Attempt != 1 || f.Final {
-		t.Fatalf("retry failure = Attempt %d Final %v, want first delivery, not final", f.Attempt, f.Final)
+	if !slices.Equal(retryAttempts, []int{1, 2}) {
+		t.Fatalf("retry attempts = %v, want the delivery counts 1 then 2", retryAttempts)
 	}
-	if f := byID["reject"]; !f.Final || f.Attempt != 1 {
-		t.Fatalf("reject failure = Attempt %d Final %v, want final first delivery", f.Attempt, f.Final)
+	if len(reject) != 1 || !reject[0].Final || reject[0].Attempt != 1 {
+		t.Fatalf("reject failures = %+v, want one final first delivery", reject)
 	}
 }

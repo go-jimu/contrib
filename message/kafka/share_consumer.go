@@ -2,10 +2,11 @@ package kafka
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -70,10 +71,17 @@ type ShareConsumer struct {
 	client shareClient
 	policy ShareFailurePolicy
 
-	// ack and deliveryCount are kgo.Record methods, replaced in tests.
-	ack           func(*kgo.Record, kgo.AckStatus)
-	deliveryCount func(*kgo.Record) int32
+	// ack, deliveryCount, and acquisitionDeadline are kgo.Record methods,
+	// replaced in tests.
+	ack                 func(*kgo.Record, kgo.AckStatus)
+	deliveryCount       func(*kgo.Record) int32
+	acquisitionDeadline func(*kgo.Record) time.Time
 }
+
+// shareLockMargin is how long before its acquisition deadline a record is
+// treated as expired: the deadline is computed on the broker before the fetch
+// is sent, and the ack still has to travel back.
+const shareLockMargin = 2 * time.Second
 
 // NewShareConsumer returns a ShareConsumer for client, which needs
 // kgo.ShareGroup and kgo.ConsumeTopics. policy decides message-level
@@ -81,11 +89,13 @@ type ShareConsumer struct {
 //
 // It honors WithCodec, WithKindResolver, WithPayloadResolver, WithHeaderNames,
 // WithErrorObserver, WithHandlerTimeout, WithMaxPollRecords, WithConcurrency,
-// and WithCloseClient; the Consumer's retry and recovery options do not apply.
+// WithDeliveryLimit, and WithCloseClient; the Consumer's retry and recovery
+// options do not apply.
 //
 // It returns ErrNilFailurePolicy for a nil policy, ErrNoPayloadResolver
 // without WithPayloadResolver, and an error matching ErrInvalidClient for a
-// client without a share group. Run reports a nil client as ErrNilClient.
+// client without kgo.ShareGroup or kgo.ConsumeTopics. Run reports a nil
+// client as ErrNilClient.
 func NewShareConsumer(client *kgo.Client, policy ShareFailurePolicy, opts ...Option) (*ShareConsumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -96,8 +106,15 @@ func NewShareConsumer(client *kgo.Client, policy ShareFailurePolicy, opts ...Opt
 
 	var consumer shareClient
 	if client != nil {
+		var missing []string
 		if group, _ := client.OptValue(kgo.ShareGroup).(string); group == "" {
-			return nil, fmt.Errorf("%w: missing kgo.ShareGroup", ErrInvalidClient)
+			missing = append(missing, "kgo.ShareGroup")
+		}
+		if !consumesTopics(client) {
+			missing = append(missing, "kgo.ConsumeTopics")
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("%w: missing %s", ErrInvalidClient, strings.Join(missing, ", "))
 		}
 		consumer = client
 	}
@@ -112,11 +129,12 @@ func newShareConsumer(client shareClient, policy ShareFailurePolicy, cfg config)
 		return nil, ErrNoPayloadResolver
 	}
 	return &ShareConsumer{
-		dispatcher:    newDispatcher(cfg),
-		client:        client,
-		policy:        policy,
-		ack:           (*kgo.Record).Ack,
-		deliveryCount: (*kgo.Record).DeliveryCount,
+		dispatcher:          newDispatcher(cfg),
+		client:              client,
+		policy:              policy,
+		ack:                 (*kgo.Record).Ack,
+		deliveryCount:       (*kgo.Record).DeliveryCount,
+		acquisitionDeadline: (*kgo.Record).AcquisitionDeadline,
 	}, nil
 }
 
@@ -129,51 +147,27 @@ func (c *ShareConsumer) Close() {
 }
 
 // Run consumes batches until ctx ends, then returns nil. It returns an error
-// when the consumer cannot continue: ErrNilClient, or a poll error with no
-// records. Call Run from one goroutine only. See Share groups and Shutdown in
-// the package documentation.
+// when the consumer cannot continue: ErrNilClient, or a poll error that stops
+// it. Call Run from one goroutine only, and once per client. See Share
+// groups, Poll errors, and Shutdown in the package documentation.
 func (c *ShareConsumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
 	defer c.flush(ctx)
 
-	err := c.run(ctx)
-	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-		return nil
-	}
-	return err
-}
-
-func (c *ShareConsumer) run(ctx context.Context) error {
 	for {
-		fetches := c.client.PollRecords(ctx, c.cfg.maxPollRecords)
-
-		var pollErr error
-		for _, fetchErr := range fetches.Errors() {
-			err := fetchErr.Err
-			c.observe(ctx, Error{Stage: StagePoll, Err: err})
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			if pollErr == nil {
-				pollErr = err
-			}
+		fetches := c.client.PollRecords(ctx, c.batchSize())
+		pollErr := c.pollError(ctx, fetches)
+		// processBatch acknowledges every record, releasing them when ctx
+		// has ended, so the next poll auto-accepts nothing.
+		if records := fetches.Records(); len(records) > 0 {
+			c.processBatch(ctx, records)
+		} else if pollErr != nil && ctx.Err() == nil {
+			return pollErr
 		}
-
-		records := fetches.Records()
-		if len(records) == 0 {
-			if pollErr != nil {
-				return pollErr
-			}
-			continue
-		}
-		c.processBatch(ctx, records)
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx.Err() != nil {
+			return nil
 		}
 	}
 }
@@ -207,7 +201,12 @@ func (c *ShareConsumer) processBatch(ctx context.Context, records []*kgo.Record)
 }
 
 func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) kgo.AckStatus {
-	msg, stage, err := c.dispatch(ctx, record)
+	timeout, expired := c.handlerTimeout(record)
+	if expired {
+		// The broker may already have handed the record to another member.
+		return kgo.AckRelease
+	}
+	msg, stage, err := c.dispatch(ctx, record, timeout)
 	if err == nil {
 		return kgo.AckAccept
 	}
@@ -224,7 +223,8 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 		Attempt: int(c.deliveryCount(record)),
 	}
 	action := c.policy.Decide(ctx, failure)
-	failure.Final = action != ShareActionRelease
+	failure.Final = action != ShareActionRelease ||
+		(c.cfg.deliveryLimit > 0 && failure.Attempt >= c.cfg.deliveryLimit)
 	c.observe(ctx, failure)
 
 	switch action {
@@ -235,6 +235,34 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 	default:
 		return kgo.AckRelease
 	}
+}
+
+// handlerTimeout bounds the handlers of record by WithHandlerTimeout and by
+// its acquisition deadline, less shareLockMargin. It reports expired when the
+// deadline leaves no time.
+func (c *ShareConsumer) handlerTimeout(record *kgo.Record) (time.Duration, bool) {
+	timeout := c.cfg.handlerTimeout
+	deadline := c.acquisitionDeadline(record)
+	if deadline.IsZero() {
+		return timeout, false
+	}
+	left := time.Until(deadline) - shareLockMargin
+	if left <= 0 {
+		return 0, true
+	}
+	if timeout <= 0 || left < timeout {
+		timeout = left
+	}
+	return timeout, false
+}
+
+// batchSize is WithMaxPollRecords, or by default one record per concurrent
+// handler, so no record waits in a batch while its acquisition lock runs.
+func (c *ShareConsumer) batchSize() int {
+	if c.cfg.maxPollRecordsSet {
+		return c.cfg.maxPollRecords
+	}
+	return c.concurrency()
 }
 
 func (c *ShareConsumer) concurrency() int {

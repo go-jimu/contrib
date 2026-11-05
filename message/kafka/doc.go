@@ -21,12 +21,12 @@
 //
 // Runtime composition takes these steps:
 //
-//  1. Build one client with NewClient. A Consumer client needs
-//     kgo.ConsumerGroup, kgo.DisableAutoCommit, and kgo.BlockRebalanceOnPoll;
-//     a ShareConsumer client needs kgo.ShareGroup. Either needs
-//     kgo.ConsumeTopics listing the topic of every Kind a handler subscribes
-//     to, the Kind itself by default; a Kind whose topic is missing is never
-//     delivered.
+//  1. Build one client with NewClient for each consumer. A Consumer client
+//     needs kgo.ConsumerGroup, kgo.DisableAutoCommit, and
+//     kgo.BlockRebalanceOnPoll; a ShareConsumer client needs kgo.ShareGroup.
+//     Either needs kgo.ConsumeTopics listing the topic of every Kind a handler
+//     subscribes to, the Kind itself by default; a Kind whose topic is
+//     missing is never delivered.
 //  2. Build a *message.PayloadRegistry, the publisher, and the consumer with
 //     WithPayloadResolver(registry). The publisher may share the consumer's
 //     client.
@@ -37,7 +37,8 @@
 //  4. Start Run on its own goroutine.
 //  5. Shut down: cancel Run's ctx, wait for Run to return, then close the
 //     client after every publisher sharing it has stopped. Close closes it
-//     when WithCloseClient(true) was set.
+//     when WithCloseClient(true) was set. A client serves one Run: to consume
+//     again, build a new client and consumer.
 //
 // Composition is done when the constructor returned no error, every
 // subscribed Kind is registered and its topic consumed, and shutdown follows
@@ -53,7 +54,8 @@
 //	registry := message.NewPayloadRegistry()
 //	consumer, err := kafka.NewConsumer(client, kafka.RetryPolicy(kafka.RetryConfig{}),
 //		kafka.WithPayloadResolver(registry),
-//		kafka.WithHandlerTimeout(30*time.Second),
+//		kafka.WithHandlerTimeout(5*time.Second),
+//		kafka.WithMaxPollRecords(10), // 10 × 5s stays below kgo's 60s RebalanceTimeout
 //		kafka.WithErrorObserver(observe),
 //	)
 //	publisher := kafka.NewPublisher(client)
@@ -91,7 +93,8 @@
 // Handlers receive Run's ctx, bounded by WithHandlerTimeout when set. Return
 // promptly when ctx ends: a handler past its timeout fails with
 // ErrHandlerTimeout and the consumer moves on, while a goroutine that ignores
-// ctx keeps running alongside the retry of its record.
+// ctx keeps running alongside the retry of its record. At shutdown Run waits
+// for running handlers, up to the rest of their timeout.
 //
 // # Consumer failures
 //
@@ -119,8 +122,9 @@
 // A record retried in place holds up the rest of its partition until it is
 // settled, so a record that always fails delays the records behind it by the
 // sum of its backoffs. Attempts are counted in memory for the head of each
-// partition; a restart, or the partition moving to another member, counts
-// from 1 again.
+// partition, and kept while that record stays the head in this process, even
+// across a rebalance that hands the partition back; a restart, or another
+// member taking the partition, counts from 1 again.
 //
 // # Recoverer
 //
@@ -150,32 +154,50 @@
 // rebalance. kgo.BlockRebalanceOnPoll holds rebalances until then, so every
 // commit is for a partition still assigned. The price: a batch must finish
 // within the client's kgo.RebalanceTimeout, and its slowest partition holds up
-// the commit and rebalance of all. Bound it with WithHandlerTimeout and
-// WithMaxPollRecords.
+// the commit and rebalance of all. A partition's records run one after
+// another, so keep the number of records of one partition in a batch times
+// WithHandlerTimeout below kgo.RebalanceTimeout; WithMaxPollRecords bounds
+// that number. A member that holds a rebalance too long loses its group
+// session: franz-go rejoins by itself, and the uncommitted records of the
+// batch are delivered again.
 //
 // # Share groups
 //
 // The ShareConsumer handles each batch with at most WithConcurrency handlers
 // at once and acknowledges every record before the next poll: accepted when
-// its handlers succeed, otherwise as the ShareFailurePolicy decides.
+// its handlers succeed, otherwise as the ShareFailurePolicy decides. A batch
+// holds one record per handler by default (WithMaxPollRecords overrides it).
 // ReleaseOrRejectPolicy releases a failure DefaultRetryable accepts and
 // rejects the others. The broker delivers a released record again, with
 // Error.Attempt, the delivery count, incremented, up to the group's
 // share.delivery.count.limit (5 by default). It archives a rejected or
 // exhausted record, or writes it to the group's dead-letter topic when it
 // supports KIP-1191 (share.version 2) and the group is configured for one.
+// A release on the last allowed delivery is reported with Error.Final set;
+// WithDeliveryLimit tells the consumer the group's limit.
 //
-// Configure the share group on the broker: set share.auto.offset.reset to
-// earliest to consume records that predate the group, and keep
-// WithHandlerTimeout below share.record.lock.duration.ms (30s by default), the
-// time after which the broker delivers a held record again.
+// The broker locks each delivered record for share.record.lock.duration.ms
+// (30s by default) from the fetch, and delivers it again once the lock
+// expires. The ShareConsumer ends the handlers' ctx a margin before the lock
+// does, and releases a record whose lock has nearly run out without handling
+// it. A record that waits in the client is still locked, so keep the client's
+// fetches small (kgo.ShareMaxRecords, about WithConcurrency) and handlers well
+// within the lock. Set share.auto.offset.reset to earliest on the group to
+// consume records that predate it.
+//
+// # Poll errors
+//
+// Each poll error is observed at StagePoll. Data loss (*kgo.ErrDataLoss) and a
+// lost group session (*kgo.ErrGroupSession) are informational: franz-go
+// recovers by itself, and Run goes on. Any other error stops Run when the
+// poll brought no records.
 //
 // # Shutdown
 //
 // When Run's ctx ends, the Consumer stops each partition before its next
-// record and commits the settled records; the ShareConsumer releases the
-// records it has not handled and flushes its acknowledgements. Both then
-// return nil. A failure that happens after ctx ended, such as a handler cut
+// record, commits the settled records, and rewinds the rest; the
+// ShareConsumer releases the records it has not handled and flushes its
+// acknowledgements. Both then return nil, and the ended ctx is not observed. A failure that happens after ctx ended, such as a handler cut
 // short, is left for redelivery without the policy or the ErrorObserver.
 // Commits and acknowledgement flushes run on a ctx detached from Run's,
 // bounded by a timeout, so shutdown completes them. Run lists the errors that

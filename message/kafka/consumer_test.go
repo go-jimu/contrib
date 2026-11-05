@@ -3,10 +3,12 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -730,5 +732,119 @@ func TestConsumerHandlesRecordsFromMixedFetch(t *testing.T) {
 	}
 	if got := h.observed.stage(StagePoll); len(got) == 0 || !errors.Is(got[0].Err, partitionErr) {
 		t.Fatalf("poll observations = %+v, want the partition error first", got)
+	}
+}
+
+// Intent (review #2): a commit that fails with a context error is a commit
+// failure, even when Run's own ctx ended with the same error.
+func TestConsumerCommitTimeoutAfterDeadlineIsNotShutdown(t *testing.T) {
+	h := newHarness(t, DropAndCommitPolicy())
+	ctx, cancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
+	t.Cleanup(cancel)
+	h.ctx = ctx
+	h.client.commitErr = fmt.Errorf("commit: %w", context.DeadlineExceeded)
+	h.client.commitHook = func() { <-ctx.Done() }
+	h.queue(fetchOf(testRecord(t, h.consumer.cfg, 0, 0)))
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+
+	if err := h.run(); !errors.Is(err, ErrCommitFailed) {
+		t.Fatalf("Run error = %v, want ErrCommitFailed", err)
+	}
+}
+
+// Intent (review #3): with a handler timeout set, shutdown still waits for a
+// running handler (up to the timeout), so the caller can close what the
+// handler uses once Run returns; a handler that finishes is committed.
+func TestConsumerShutdownWaitsForRunningHandler(t *testing.T) {
+	h := newHarness(t, DropAndCommitPolicy(), WithHandlerTimeout(time.Minute))
+	h.queue(fetchOf(testRecord(t, h.consumer.cfg, 0, 0)))
+	var finished atomic.Bool
+	h.subscribe(func(context.Context, message.Message) error {
+		h.cancel()
+		time.Sleep(100 * time.Millisecond) // ignores ctx on purpose
+		finished.Store(true)
+		return nil
+	})
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	if !finished.Load() {
+		t.Fatal("Run returned while the handler was still running")
+	}
+	if want := [][]string{{"0@0"}}; !reflect.DeepEqual(h.client.committedOffsets(), want) {
+		t.Fatalf("commits = %v, want the finished record committed", h.client.committedOffsets())
+	}
+}
+
+// Intent (review #4): records polled together with an error, when ctx ends
+// meanwhile, are rewound rather than skipped, so a later Run on the client
+// gets them again.
+func TestConsumerRewindsPolledRecordsWhenShutdownMeetsPollError(t *testing.T) {
+	h := newHarness(t, DropAndCommitPolicy())
+	mixed := fetchOf(testRecord(t, h.consumer.cfg, 1, 7))
+	mixed[0].Topics[0].Partitions = append(mixed[0].Topics[0].Partitions, kgo.FetchPartition{Partition: 0, Err: errors.New("not leader")})
+	h.queue(mixed)
+	h.client.pollHooks[1] = h.cancel
+	handled := 0
+	h.subscribe(func(context.Context, message.Message) error { handled++; return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	if handled != 0 {
+		t.Fatalf("handled %d records after shutdown", handled)
+	}
+	if len(h.client.setOffsets) != 1 || h.client.setOffsets[0][testTopic][1].Offset != 7 {
+		t.Fatalf("SetOffsets = %v, want partition 1 rewound to 7", h.client.setOffsets)
+	}
+}
+
+// Intent (review #6): a normal shutdown is not a failure, so the observer
+// sees no StagePoll context error.
+func TestConsumerShutdownIsNotObservedAsPollFailure(t *testing.T) {
+	h := newHarness(t, DropAndCommitPolicy())
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	if got := h.observed.stage(StagePoll); len(got) != 0 {
+		t.Fatalf("poll observations at shutdown = %+v, want none", got)
+	}
+}
+
+// Intent (review #7): data loss and a lost group session are informational
+// in franz-go: the client recovers by itself, so Run observes them and goes on.
+func TestConsumerContinuesAfterInformationalPollErrors(t *testing.T) {
+	h := newHarness(t, DropAndCommitPolicy())
+	h.queue(
+		fetchError(&kgo.ErrDataLoss{Topic: testTopic, Partition: 0, ConsumedTo: 10, ResetTo: 5}),
+		fetchError(&kgo.ErrGroupSession{Err: errors.New("rebalance blocked too long")}),
+		fetchOf(testRecord(t, h.consumer.cfg, 0, 0)),
+	)
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v, want nil: informational errors must not stop Run", err)
+	}
+	if got := h.observed.stage(StagePoll); len(got) != 2 {
+		t.Fatalf("poll observations = %d, want 2", len(got))
+	}
+	if want := [][]string{{"0@0"}}; !reflect.DeepEqual(h.client.committedOffsets(), want) {
+		t.Fatalf("commits = %v, want %v", h.client.committedOffsets(), want)
+	}
+}
+
+// Intent (review #11): a client consuming no topics is rejected up front.
+func TestNewConsumerRequiresConsumeTopics(t *testing.T) {
+	client, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:1"), kgo.ConsumerGroup("g"), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll())
+	if err != nil {
+		t.Fatalf("kgo.NewClient: %v", err)
+	}
+	defer client.Close()
+	_, err = NewConsumer(client, DropAndCommitPolicy(), WithPayloadResolver(testConsumerConfig().payloadResolver))
+	if !errors.Is(err, ErrInvalidClient) || !strings.Contains(err.Error(), "kgo.ConsumeTopics") {
+		t.Fatalf("NewConsumer error = %v, want ErrInvalidClient naming kgo.ConsumeTopics", err)
 	}
 }

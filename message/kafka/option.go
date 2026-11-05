@@ -71,6 +71,8 @@ type config struct {
 	commitTimeout       time.Duration
 	maxPollRecords      int
 	concurrency         int
+	maxPollRecordsSet   bool
+	deliveryLimit       int
 	afterFunc           func(time.Duration, func())
 	publishRetry        publishRetryConfig
 	closeClient         bool
@@ -92,6 +94,7 @@ func defaultConfig() config {
 		retryBackoff:        DefaultRetryBackoff,
 		commitTimeout:       10 * time.Second,
 		maxPollRecords:      DefaultMaxPollRecords,
+		deliveryLimit:       DefaultDeliveryLimit,
 		afterFunc:           func(d time.Duration, f func()) { time.AfterFunc(d, f) },
 		publishRetry:        publishRetryConfig{maxAttempts: 1, sleep: sleepContext},
 		headerNames:         defaultHeaderNames(),
@@ -277,9 +280,9 @@ func WithRetryBackoff(backoff RetryBackoff) Option {
 // WithHandlerTimeout bounds how long the handlers of one record run, for both
 // consumers. At the timeout the handlers' ctx is cancelled and the record
 // fails at StageHandle with an error matching ErrHandlerTimeout. 0 or less,
-// the default, sets no timeout. Set it below the client's kgo.RebalanceTimeout
-// for the Consumer and below the share group's record lock for the
-// ShareConsumer; see Handlers in the package documentation.
+// the default, sets no timeout. How to size it against kgo.RebalanceTimeout
+// and the share group's record lock is in Consumer offsets and rebalances,
+// and Share groups, in the package documentation.
 func WithHandlerTimeout(timeout time.Duration) Option {
 	return func(cfg *config) {
 		cfg.handlerTimeout = timeout
@@ -299,12 +302,13 @@ func WithRecoverer(recoverer Recoverer) Option {
 const DefaultMaxPollRecords = 500
 
 // WithMaxPollRecords limits the records of one batch, for both consumers. 0 or
-// less means no limit; the default is DefaultMaxPollRecords. A smaller batch
-// lets a Consumer group rebalance sooner; see Consumer offsets and rebalances
-// in the package documentation.
+// less means no limit. The default is DefaultMaxPollRecords for the Consumer
+// and WithConcurrency for the ShareConsumer. See Consumer offsets and
+// rebalances, and Share groups, in the package documentation.
 func WithMaxPollRecords(n int) Option {
 	return func(cfg *config) {
 		cfg.maxPollRecords = max(n, 0)
+		cfg.maxPollRecordsSet = true
 	}
 }
 
@@ -315,5 +319,18 @@ func WithMaxPollRecords(n int) Option {
 func WithConcurrency(n int) Option {
 	return func(cfg *config) {
 		cfg.concurrency = n
+	}
+}
+
+// DefaultDeliveryLimit is Kafka's default share.delivery.count.limit.
+const DefaultDeliveryLimit = 5
+
+// WithDeliveryLimit tells the ShareConsumer the share group's
+// share.delivery.count.limit, so that a release on the last allowed delivery
+// is reported with Error.Final set: the broker archives the record next. The
+// default is DefaultDeliveryLimit; 0 or less never marks a release final.
+func WithDeliveryLimit(n int) Option {
+	return func(cfg *config) {
+		cfg.deliveryLimit = max(n, 0)
 	}
 }

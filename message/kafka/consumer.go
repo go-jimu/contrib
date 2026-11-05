@@ -2,8 +2,8 @@ package kafka
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,10 +90,28 @@ func validateGroupClient(client *kgo.Client) error {
 	if block, _ := client.OptValue(kgo.BlockRebalanceOnPoll).(bool); !block {
 		missing = append(missing, "kgo.BlockRebalanceOnPoll")
 	}
+	if !consumesTopics(client) {
+		missing = append(missing, "kgo.ConsumeTopics")
+	}
 	if len(missing) > 0 {
 		return fmt.Errorf("%w: missing %s", ErrInvalidClient, strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// consumesTopics reports whether client was given kgo.ConsumeTopics.
+// OptValue returns the topics as a map[string]*regexp.Regexp, as of franz-go
+// v1.22.2 and its master branch, although its doc comment says []string; the
+// slice case keeps the check working should the code follow the doc.
+func consumesTopics(client *kgo.Client) bool {
+	switch topics := client.OptValue(kgo.ConsumeTopics).(type) {
+	case map[string]*regexp.Regexp:
+		return len(topics) > 0
+	case []string:
+		return len(topics) > 0
+	default:
+		return false
+	}
 }
 
 func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer, error) {
@@ -120,60 +138,40 @@ func (c *Consumer) Close() {
 }
 
 // Run consumes batches until ctx ends, then returns nil. It returns an error
-// when the consumer cannot continue: ErrNilClient, a poll error with no
-// records, an error matching ErrCommitFailed, or one matching ErrStopped when
-// the FailurePolicy chose FailureActionStop. Call Run from one goroutine only.
-// See Consumer offsets and rebalances, and Shutdown, in the package
-// documentation.
+// when the consumer cannot continue: ErrNilClient, a poll error that stops it,
+// an error matching ErrCommitFailed, or one matching ErrStopped when the
+// FailurePolicy chose FailureActionStop. Call Run from one goroutine only, and
+// once per client. See Consumer offsets and rebalances, Poll errors, and
+// Shutdown in the package documentation.
 func (c *Consumer) Run(ctx context.Context) error {
-	err := c.run(ctx)
-	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-		// ctx ending is a normal shutdown, as message.Runner defines.
-		return nil
-	}
-	return err
-}
-
-func (c *Consumer) run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
 	for {
-		if err := c.pollOnce(ctx); err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
+		shutdown, err := c.pollOnce(ctx)
+		if err != nil || shutdown {
 			return err
 		}
 	}
 }
 
-// pollOnce handles one poll. It always lets the group rebalance before it
-// returns, after the batch is committed and rewound.
-func (c *Consumer) pollOnce(ctx context.Context) error {
+// pollOnce handles one poll and reports whether ctx has ended. It always
+// lets the group rebalance before it returns, after the batch is committed
+// and rewound. Records polled when ctx has already ended are rewound by
+// processBatch, not dropped.
+func (c *Consumer) pollOnce(ctx context.Context) (bool, error) {
 	fetches := c.client.PollRecords(ctx, c.cfg.maxPollRecords)
 	defer c.client.AllowRebalance()
 
-	var pollErr error
-	for _, fetchErr := range fetches.Errors() {
-		err := fetchErr.Err
-		c.observe(ctx, Error{Stage: StagePoll, Err: err})
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+	pollErr := c.pollError(ctx, fetches)
+	if batches := splitByPartition(fetches); len(batches) > 0 {
+		if err := c.processBatch(ctx, batches); err != nil {
+			return true, err
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		if pollErr == nil {
-			pollErr = err
-		}
+	} else if pollErr != nil && ctx.Err() == nil {
+		return true, pollErr
 	}
-
-	batches := splitByPartition(fetches)
-	if len(batches) == 0 {
-		return pollErr
-	}
-	return c.processBatch(ctx, batches)
+	return ctx.Err() != nil, nil
 }
 
 type partitionBatch struct {
@@ -343,13 +341,15 @@ type recordOutcome struct {
 
 func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record *kgo.Record) recordOutcome {
 	head := c.head(tp, record.Offset)
-	if head.recoverPending {
+	if head != nil && head.recoverPending {
 		return c.recover(ctx, tp, head, head.failure)
 	}
 
-	msg, stage, err := c.dispatch(ctx, record)
+	msg, stage, err := c.dispatch(ctx, record, c.cfg.handlerTimeout)
 	if err == nil {
-		c.clearHead(tp)
+		if head != nil {
+			c.clearHead(tp)
+		}
 		return recordOutcome{kind: outcomeDone}
 	}
 
@@ -359,6 +359,9 @@ func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record 
 		return recordOutcome{kind: outcomeLater}
 	}
 
+	if head == nil {
+		head = c.newHead(tp, record.Offset)
+	}
 	head.attempts++
 	failure := Error{
 		Stage:   stage,
@@ -422,14 +425,27 @@ func (c *Consumer) backoff(attempt int) time.Duration {
 	return delay
 }
 
+// head returns the state of the failing record at offset, or nil when the
+// partition has none for it.
 func (c *Consumer) head(tp topicPartition, offset int64) *headState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	head := c.heads[tp]
-	if head == nil || head.offset != offset {
-		head = &headState{offset: offset}
-		c.heads[tp] = head
+	if head == nil {
+		return nil
 	}
+	if head.offset != offset {
+		delete(c.heads, tp)
+		return nil
+	}
+	return head
+}
+
+func (c *Consumer) newHead(tp topicPartition, offset int64) *headState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	head := &headState{offset: offset}
+	c.heads[tp] = head
 	return head
 }
 

@@ -12,8 +12,8 @@ import (
 type Stage string
 
 const (
-	// StagePoll is a fetch error from PollFetches. It is observed only; Run
-	// returns it when the poll produced no records.
+	// StagePoll is a fetch error from a poll. See Poll errors in the package
+	// documentation for which ones stop Run.
 	StagePoll Stage = "poll"
 	// StageDecode is a failure to turn a record into a message.Message:
 	// missing kind, unresolvable payload, or a payload that does not
@@ -42,8 +42,9 @@ const (
 // Consumer, attempts since this process started handling the record at the
 // head of its partition (see Consumer failures in the package documentation);
 // for the ShareConsumer, the broker's delivery count.
-// Final reports that no further attempt follows: the policy chose to drop the
-// record or stop. The FailurePolicy sees Final false, as it decides it.
+// Final reports that no further attempt follows: the policy chose to drop,
+// stop, or reject, or released the record on its last allowed delivery. The
+// policies see Final false, as they decide it.
 //
 // Error is a value passed to callbacks and does not implement the error
 // interface.

@@ -15,14 +15,32 @@ import (
 // fakeShareClient serves queued fetches and cancels Run's ctx when they run
 // out, like fakeConsumerClient.
 type fakeShareClient struct {
+	t         *testing.T
 	mu        sync.Mutex
 	fetches   []kgo.Fetches
+	pollHooks map[int]func()
 	cancel    context.CancelFunc
 	flushCtxs []error
 	closed    bool
+	pollCount int
+	pollMax   []int
+	// acks and lastPolled check that every record of a poll is acknowledged
+	// before the next poll: the real client auto-accepts the rest.
+	acks       *ackRecorder
+	lastPolled []*kgo.Record
 }
 
-func (f *fakeShareClient) PollRecords(ctx context.Context, _ int) kgo.Fetches {
+func (f *fakeShareClient) PollRecords(ctx context.Context, maxRecords int) kgo.Fetches {
+	f.mu.Lock()
+	f.pollCount++
+	f.pollMax = append(f.pollMax, maxRecords)
+	hook := f.pollHooks[f.pollCount]
+	f.checkAcked()
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.fetches) == 0 {
@@ -31,12 +49,23 @@ func (f *fakeShareClient) PollRecords(ctx context.Context, _ int) kgo.Fetches {
 	}
 	fetches := f.fetches[0]
 	f.fetches = f.fetches[1:]
+	f.lastPolled = fetches.Records()
 	return fetches
+}
+
+func (f *fakeShareClient) checkAcked() {
+	for _, r := range f.lastPolled {
+		if _, ok := f.acks.get(recordID(r.Partition, r.Offset)); !ok {
+			f.t.Errorf("%s was not acknowledged before the next poll; the client would auto-accept it", recordID(r.Partition, r.Offset))
+		}
+	}
+	f.lastPolled = nil
 }
 
 func (f *fakeShareClient) FlushAcks(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.checkAcked()
 	f.flushCtxs = append(f.flushCtxs, ctx.Err())
 	return nil
 }
@@ -86,10 +115,10 @@ func newShareHarness(t *testing.T, policy ShareFailurePolicy, opts ...Option) *s
 		t:        t,
 		ctx:      ctx,
 		cancel:   cancel,
-		client:   &fakeShareClient{cancel: cancel},
 		acks:     &ackRecorder{t: t, acks: map[string]kgo.AckStatus{}},
 		observed: &observed{},
 	}
+	h.client = &fakeShareClient{t: t, cancel: cancel, acks: h.acks, pollHooks: map[int]func(){}}
 	cfg := testConsumerConfig()
 	WithErrorObserver(h.observed.observe)(&cfg)
 	for _, opt := range opts {
@@ -101,6 +130,7 @@ func newShareHarness(t *testing.T, policy ShareFailurePolicy, opts ...Option) *s
 	}
 	consumer.ack = h.acks.ack
 	consumer.deliveryCount = func(*kgo.Record) int32 { return 1 }
+	consumer.acquisitionDeadline = func(*kgo.Record) time.Time { return time.Time{} }
 	h.consumer = consumer
 	return h
 }
@@ -341,5 +371,133 @@ func TestShareConsumerPollErrorFlushes(t *testing.T) {
 	}
 	if len(h.client.flushCtxs) != 1 {
 		t.Fatalf("FlushAcks calls = %d, want 1", len(h.client.flushCtxs))
+	}
+}
+
+// Intent (review #1): a record whose acquisition lock has run out, or nearly,
+// is released without running the handlers: the broker may already have
+// handed it to another member.
+func TestShareConsumerReleasesRecordPastAcquisitionDeadline(t *testing.T) {
+	h := newShareHarness(t, ReleaseOrRejectPolicy())
+	h.consumer.acquisitionDeadline = func(*kgo.Record) time.Time { return time.Now().Add(time.Second) }
+	h.client.fetches = []kgo.Fetches{fetchOf(testRecord(t, h.consumer.cfg, 0, 0))}
+	handled := 0
+	h.subscribe(func(context.Context, message.Message) error { handled++; return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	if got, _ := h.acks.get("p0-o0"); got != kgo.AckRelease || handled != 0 {
+		t.Fatalf("ack = %v, handled = %d; want release without handling", got, handled)
+	}
+}
+
+// Intent (review #1): the handlers' ctx ends before the acquisition lock
+// does, even without WithHandlerTimeout, so the ack still reaches the broker
+// in time.
+func TestShareConsumerHandlerCtxEndsBeforeAcquisitionDeadline(t *testing.T) {
+	h := newShareHarness(t, ReleaseOrRejectPolicy())
+	deadline := time.Now().Add(shareLockMargin + 50*time.Millisecond)
+	h.consumer.acquisitionDeadline = func(*kgo.Record) time.Time { return deadline }
+	h.client.fetches = []kgo.Fetches{fetchOf(testRecord(t, h.consumer.cfg, 0, 0))}
+	h.subscribe(func(ctx context.Context, _ message.Message) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	failures := h.observed.stage(StageHandle)
+	if len(failures) != 1 || !errors.Is(failures[0].Err, ErrHandlerTimeout) {
+		t.Fatalf("failures = %+v, want one matching ErrHandlerTimeout", failures)
+	}
+}
+
+// Intent (review #1): by default a ShareConsumer polls one record per
+// concurrent handler, so no record waits in a batch while its lock runs.
+func TestShareConsumerDefaultBatchIsConcurrency(t *testing.T) {
+	for _, tt := range []struct {
+		opts []Option
+		want int
+	}{
+		{[]Option{WithConcurrency(3)}, 3},
+		{[]Option{WithConcurrency(3), WithMaxPollRecords(50)}, 50},
+	} {
+		h := newShareHarness(t, ReleaseOrRejectPolicy(), tt.opts...)
+		h.subscribe(func(context.Context, message.Message) error { return nil })
+		if err := h.run(); err != nil {
+			t.Fatalf("Run error = %v", err)
+		}
+		if h.client.pollMax[0] != tt.want {
+			t.Fatalf("poll limit = %d, want %d", h.client.pollMax[0], tt.want)
+		}
+	}
+}
+
+// Intent (review #4): records polled together with an error, when ctx ends
+// meanwhile, are released rather than left for the next poll to auto-accept.
+func TestShareConsumerReleasesPolledRecordsWhenShutdownMeetsPollError(t *testing.T) {
+	h := newShareHarness(t, ReleaseOrRejectPolicy())
+	mixed := fetchOf(testRecord(t, h.consumer.cfg, 1, 7))
+	mixed[0].Topics[0].Partitions = append(mixed[0].Topics[0].Partitions, kgo.FetchPartition{Partition: 0, Err: errors.New("not leader")})
+	h.client.fetches = []kgo.Fetches{mixed}
+	h.client.pollHooks[1] = h.cancel
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	if got, ok := h.acks.get("p1-o7"); !ok || got != kgo.AckRelease {
+		t.Fatalf("ack = %v (set %v), want release", got, ok)
+	}
+}
+
+// Intent (review #5): a release on the last delivery the broker allows is
+// final: the broker archives the record next.
+func TestShareConsumerReleaseAtDeliveryLimitIsFinal(t *testing.T) {
+	for _, tt := range []struct {
+		opts  []Option
+		count int32
+		final bool
+	}{
+		{nil, 4, false},
+		{nil, 5, true}, // Kafka's default share.delivery.count.limit
+		{[]Option{WithDeliveryLimit(8)}, 5, false},
+		{[]Option{WithDeliveryLimit(8)}, 8, true},
+	} {
+		h := newShareHarness(t, ReleaseOrRejectPolicy(), tt.opts...)
+		h.consumer.deliveryCount = func(*kgo.Record) int32 { return tt.count }
+		h.client.fetches = []kgo.Fetches{fetchOf(testRecord(t, h.consumer.cfg, 0, 0))}
+		h.subscribe(func(context.Context, message.Message) error { return errors.New("database unavailable") })
+
+		if err := h.run(); err != nil {
+			t.Fatalf("Run error = %v", err)
+		}
+		failures := h.observed.stage(StageHandle)
+		if len(failures) != 1 || failures[0].Final != tt.final {
+			t.Fatalf("delivery %d, opts %d: failures = %+v, want Final %v", tt.count, len(tt.opts), failures, tt.final)
+		}
+	}
+}
+
+// Intent (review #6, #7): a shutdown is not observed as a poll failure, and
+// informational poll errors do not stop Run.
+func TestShareConsumerPollErrorHandling(t *testing.T) {
+	h := newShareHarness(t, ReleaseOrRejectPolicy())
+	h.client.fetches = []kgo.Fetches{
+		fetchError(&kgo.ErrGroupSession{Err: errors.New("session lost")}),
+		fetchOf(testRecord(t, h.consumer.cfg, 0, 0)),
+	}
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v, want nil", err)
+	}
+	if got := h.observed.stage(StagePoll); len(got) != 1 || errors.Is(got[0].Err, context.Canceled) {
+		t.Fatalf("poll observations = %+v, want only the group session error", got)
+	}
+	if got, _ := h.acks.get("p0-o0"); got != kgo.AckAccept {
+		t.Fatalf("ack = %v, want accept", got)
 	}
 }
