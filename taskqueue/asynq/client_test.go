@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-jimu/components/taskqueue"
 	hibiken "github.com/hibiken/asynq"
@@ -94,6 +95,26 @@ func TestClientEnqueueMapsTaskIDConflict(t *testing.T) {
 	}
 	if !errors.Is(err, hibiken.ErrTaskIDConflict) {
 		t.Fatalf("err = %v, want asynq.ErrTaskIDConflict", err)
+	}
+}
+
+// Intent: a WithUnique duplicate is also the component ErrDuplicateTask, so
+// application code detects it without importing asynq, while checks for
+// asynq.ErrDuplicateTask keep working.
+func TestClientEnqueueMapsUniqueDuplicate(t *testing.T) {
+	client := newClient(&fakeEnqueueClient{err: hibiken.ErrDuplicateTask})
+	task, err := taskqueue.New(taskqueue.Definition{Type: "document.review.v1"}, []byte("doc-1"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = client.Enqueue(context.Background(), task, taskqueue.WithUnique(time.Hour))
+
+	if !errors.Is(err, taskqueue.ErrDuplicateTask) {
+		t.Fatalf("err = %v, want taskqueue.ErrDuplicateTask", err)
+	}
+	if !errors.Is(err, hibiken.ErrDuplicateTask) {
+		t.Fatalf("err = %v, want asynq.ErrDuplicateTask", err)
 	}
 }
 

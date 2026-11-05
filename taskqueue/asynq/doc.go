@@ -8,10 +8,8 @@
 // the Client, Worker, and Scheduler, registers processors and periodic tasks
 // on them, and starts and stops them. Application code depends on
 // taskqueue.Enqueuer, implements taskqueue.Processor, and provides
-// taskqueue.PeriodicTask values. Two results still carry asynq types:
-// EnqueueInfo returns *asynq.TaskInfo, and a WithUnique duplicate is
-// asynq.ErrDuplicateTask. Keep the code that needs them in runtime
-// composition.
+// taskqueue.PeriodicTask values. EnqueueInfo returns *asynq.TaskInfo, so call
+// it from runtime composition.
 //
 // # Roles
 //
@@ -86,9 +84,10 @@
 // resolve archived failures with asynq tooling.
 //
 // WithUnique(ttl) compares task type, payload, and queue. asynq holds the
-// uniqueness lock until the TTL expires or the task completes successfully,
-// and reports a duplicate as asynq.ErrDuplicateTask, a different error from
-// taskqueue.ErrDuplicateTask.
+// uniqueness lock until the TTL expires or the task completes successfully.
+// Enqueue reports a suppressed duplicate as an error matching
+// taskqueue.ErrDuplicateTask, the same as an ID conflict: either way the work
+// is already queued, so application code handles both with one errors.Is.
 //
 // # Lifecycle
 //

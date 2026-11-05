@@ -47,10 +47,11 @@ func newClient(client enqueueClient) *Client {
 // Enqueue stores task in asynq with opts, without validating opts; see the
 // package documentation for the mapping and for unvalidated policies.
 //
-// It returns nil once Redis has stored the task, an error matching
-// taskqueue.ErrDuplicateTask (and asynq.ErrTaskIDConflict) when task.ID() is
-// still kept in its queue, asynq.ErrDuplicateTask for a WithUnique duplicate,
-// taskqueue.ErrEmptyType, ErrNilClient, or an asynq or Redis error.
+// It returns nil once Redis has stored the task; an error matching
+// taskqueue.ErrDuplicateTask when task.ID() is still kept in its queue (also
+// matching asynq.ErrTaskIDConflict) or when WithUnique suppresses a duplicate
+// (also matching asynq.ErrDuplicateTask); taskqueue.ErrEmptyType;
+// ErrNilClient; or an asynq or Redis error.
 func (c *Client) Enqueue(ctx context.Context, task taskqueue.Task, opts ...taskqueue.EnqueueOption) error {
 	_, err := c.EnqueueInfo(ctx, task, opts...)
 	return err
@@ -69,7 +70,9 @@ func (c *Client) EnqueueInfo(ctx context.Context, task taskqueue.Task, opts ...t
 		return nil, err
 	}
 	info, err := c.client.EnqueueContext(ctx, asynqTask, asynqOpts...)
-	if errors.Is(err, hibiken.ErrTaskIDConflict) {
+	// An ID conflict and a WithUnique duplicate both mean the work is already
+	// queued; the asynq error stays in the chain for callers that check it.
+	if errors.Is(err, hibiken.ErrTaskIDConflict) || errors.Is(err, hibiken.ErrDuplicateTask) {
 		return nil, fmt.Errorf("%w: %w", taskqueue.ErrDuplicateTask, err)
 	}
 	return info, err
