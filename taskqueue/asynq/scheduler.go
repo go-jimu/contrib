@@ -98,8 +98,9 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return s.runtime.Start()
 }
 
-// Shutdown stops the underlying asynq scheduler and waits for it to finish
-// until ctx is canceled.
+// Shutdown stops the underlying asynq scheduler and waits for it to finish.
+// It returns nil when it has stopped, ErrNilScheduler, or ctx.Err() if ctx
+// ends first while asynq keeps stopping in the background.
 func (s *Scheduler) Shutdown(ctx context.Context) error {
 	if s.runtime == nil {
 		return ErrNilScheduler

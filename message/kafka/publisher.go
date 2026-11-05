@@ -17,7 +17,8 @@ type publisher struct {
 }
 
 // NewPublisher returns a message.Publisher that produces to Kafka through
-// client. The client stays owned by the caller. It honors WithCodec,
+// client, which may be the consumer's client. Runtime composition owns and
+// closes the client; the publisher has no Close. It honors WithCodec,
 // WithTopicResolver, WithHeaderNames, and WithPublishRetry.
 //
 // Publish maps the message to a record and produces it synchronously,

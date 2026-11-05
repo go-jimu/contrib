@@ -16,7 +16,7 @@ const (
 
 // FailurePolicy decides how a message-level consumer failure should be
 // handled: StageDecode, StageUnhandled, or StageHandle. Decide runs on the Run
-// goroutine and must not block; an unknown FailureAction counts as
+// goroutine, so return quickly; an unknown FailureAction counts as
 // FailureActionDrop. The package documentation compares the built-in
 // policies.
 type FailurePolicy interface {

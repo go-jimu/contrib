@@ -57,8 +57,8 @@ func (c *Client) Enqueue(ctx context.Context, task taskqueue.Task, opts ...taskq
 }
 
 // EnqueueInfo is Enqueue that also returns asynq's record of the stored task,
-// such as its ID and state. It ties the caller to asynq, so call it from
-// runtime code only.
+// such as its ID and state. Its result is an asynq type, so call it from
+// runtime composition.
 func (c *Client) EnqueueInfo(ctx context.Context, task taskqueue.Task, opts ...taskqueue.EnqueueOption) (*hibiken.TaskInfo, error) {
 	if c.client == nil {
 		return nil, ErrNilClient
