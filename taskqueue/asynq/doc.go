@@ -100,4 +100,19 @@
 //
 // Shut down the Worker and Scheduler first, then Close the Client once
 // nothing enqueues through it.
+//
+// # Logging
+//
+// Logs come from two places; wire both to one *slog.Logger:
+//
+//   - Processor outcomes: wrap each processor with taskqueue.Logging, before
+//     taskqueue.Recover in taskqueue.Chain. The adapter puts the retry count
+//     and MaxRetry into taskqueue.ExecutionInfo, so a failure asynq retries
+//     is logged at Warn and the last attempt, a skipped retry, or a panic at
+//     Error. asynq.Config.ErrorHandler then needs no log of its own; use it
+//     for metrics or alerts.
+//   - asynq itself: set asynq.Config.Logger and asynq.SchedulerOpts.Logger
+//     to NewLogger(logger) for Redis connection errors, shutdown progress,
+//     and scheduler activity. asynq.Config.LogLevel (Info by default) filters
+//     before the slog handler does.
 package asynq
