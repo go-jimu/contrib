@@ -22,10 +22,10 @@ type pollClient interface {
 	Close()
 }
 
-// Consumer consumes records with a franz-go consumer-group client, decodes
-// them into message.Message values, routes them to subscribed handlers, and
-// commits offsets. It implements message.Subscriber and message.Runner. The
-// package documentation describes its failure handling and lifecycle.
+// Consumer consumes a consumer group, keeping each partition in order, and
+// commits offsets. It implements message.Subscriber and message.Runner. See
+// Consumer failures, Recoverer, and Consumer offsets and rebalances in the
+// package documentation.
 type Consumer struct {
 	dispatcher
 
@@ -53,15 +53,14 @@ type headState struct {
 	failure         Error
 }
 
-// NewConsumer returns a Consumer for client, which must be configured with
-// kgo.ConsumerGroup, kgo.ConsumeTopics, kgo.DisableAutoCommit, and
-// kgo.BlockRebalanceOnPoll. policy decides message-level failures.
-// WithPayloadResolver is required to decode payloads.
+// NewConsumer returns a Consumer for client, which needs kgo.ConsumerGroup,
+// kgo.ConsumeTopics, kgo.DisableAutoCommit, and kgo.BlockRebalanceOnPoll.
+// policy decides message-level failures, and WithPayloadResolver is required.
 //
 // It returns ErrNilFailurePolicy for a nil policy, ErrNoPayloadResolver
-// without WithPayloadResolver, and an error matching ErrInvalidClient when the
-// client lacks a required option. A nil client is reported later, by Run, as
-// ErrNilClient. NewConsumer starts nothing.
+// without WithPayloadResolver, and an error matching ErrInvalidClient naming
+// each missing client option. Run reports a nil client as ErrNilClient.
+// NewConsumer starts nothing.
 func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Consumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -120,18 +119,12 @@ func (c *Consumer) Close() {
 	}
 }
 
-// Run consumes records until ctx ends, then returns nil. It returns an error
+// Run consumes batches until ctx ends, then returns nil. It returns an error
 // when the consumer cannot continue: ErrNilClient, a poll error with no
 // records, an error matching ErrCommitFailed, or one matching ErrStopped when
-// the FailurePolicy chose FailureActionStop.
-//
-// Each poll's records are split by partition and the partitions are handled
-// concurrently, each in offset order. After the whole batch, Run commits each
-// partition's handled records in one commit, rewinds a partition that has
-// unhandled records to the first of them, and only then lets the group
-// rebalance. A message-level failure after ctx ended skips the FailurePolicy
-// and leaves the record uncommitted for redelivery. Call Run from one
-// goroutine only.
+// the FailurePolicy chose FailureActionStop. Call Run from one goroutine only.
+// See Consumer offsets and rebalances, and Shutdown, in the package
+// documentation.
 func (c *Consumer) Run(ctx context.Context) error {
 	err := c.run(ctx)
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {

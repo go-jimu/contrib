@@ -4,12 +4,12 @@ Kafka provider for `github.com/go-jimu/components/ddd/message`, built on
 `github.com/twmb/franz-go`.
 
 The contracts live in the package documentation, which `go doc -all
-github.com/go-jimu/contrib/message/kafka` prints: where the import belongs,
-the record mapping, choosing a `FailurePolicy`, dead letters, the
-`PayloadResolver` requirement, offsets and rebalances, the `Consumer.Run`
-lifecycle and shutdown order,
-and error identities. This README walks through complete programs;
-`example_test.go` runs the policy outcomes and compiles the composition.
+github.com/go-jimu/contrib/message/kafka` prints: choosing between `Consumer`
+and `ShareConsumer`, runtime composition, the record mapping, the handler
+contract, Consumer failures and the `Recoverer`, offsets and rebalances, share
+groups, shutdown, and error identities. This README walks through complete
+programs; `example_test.go` runs the policy outcomes and compiles the
+composition.
 
 ## Install
 
@@ -135,8 +135,8 @@ func run(ctx context.Context) error {
 ```
 
 `RetryPolicy` retries a handler failure in place, after a backoff, keeping the
-partition's order, and drops the record after 3 attempts. See "Choosing a
-FailurePolicy" in the package documentation before picking one.
+partition's order, and drops the record after 3 attempts. See "Consumer
+failures" in the package documentation before picking one.
 
 ## Failed messages
 

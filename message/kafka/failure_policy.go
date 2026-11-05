@@ -12,23 +12,20 @@ const (
 	// FailureActionDrop gives up on the record: the consumer calls the
 	// Recoverer, when one is set, then commits the offset and moves on.
 	FailureActionDrop FailureAction = iota
-	// FailureActionRetry handles the record again in place: the consumer
-	// leaves it uncommitted, rewinds its partition to it, and pauses the
-	// partition for the WithRetryBackoff delay. Later records of the
-	// partition wait, so the partition keeps its order.
+	// FailureActionRetry handles the record again in place after the
+	// WithRetryBackoff delay; see Consumer failures in the package
+	// documentation.
 	FailureActionRetry
 	// FailureActionStop leaves the record uncommitted and makes Run return an
 	// error matching ErrStopped and the failure's Err.
 	FailureActionStop
 )
 
-// FailurePolicy decides how a message-level consumer failure should be
-// handled: StageDecode, StageUnhandled, or StageHandle, while Run's ctx is
-// live. Error.Attempt counts the failed attempts at the record so far,
-// including this one. Decide runs concurrently for different partitions, so it
-// must be safe for concurrent use; return quickly. An unknown FailureAction
-// counts as FailureActionDrop. The package documentation compares the
-// built-in policies.
+// FailurePolicy decides each message-level Consumer failure (StageDecode,
+// StageUnhandled, or StageHandle) while Run's ctx is live. Error.Attempt
+// counts the failed attempts at the record, this one included. An unknown
+// FailureAction counts as FailureActionDrop. See Consumer failures, and the
+// concurrency contract in Handlers, in the package documentation.
 type FailurePolicy interface {
 	Decide(context.Context, Error) FailureAction
 }
@@ -64,10 +61,10 @@ type RetryConfig struct {
 	OnExhausted FailureAction
 }
 
-// DefaultRetryable retries StageHandle failures, including a handler timeout
-// (ErrHandlerTimeout) and a recovered panic (ErrHandlerPanic), unless the
-// error matches ErrNonRetryable. Decode and unhandled failures are not
-// retried: the same bytes and handlers fail the same way again.
+// DefaultRetryable accepts StageHandle failures, a handler timeout
+// (ErrHandlerTimeout) and a recovered panic (ErrHandlerPanic) included, unless
+// the error matches ErrNonRetryable. It turns down decode and unhandled
+// failures, which the same bytes and handlers repeat.
 func DefaultRetryable(failure Error) bool {
 	return failure.Stage == StageHandle && !errors.Is(failure.Err, ErrNonRetryable)
 }

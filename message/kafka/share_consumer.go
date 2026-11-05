@@ -15,26 +15,22 @@ import (
 type ShareAction int
 
 const (
-	// ShareActionRelease hands the record back to the broker, which delivers
-	// it again, possibly to another member, with its delivery count
-	// incremented. Past the group's share.delivery.count.limit the
-	// broker archives it, or writes it to the group's dead-letter topic when
-	// one is configured (KIP-1191).
+	// ShareActionRelease hands the record back for the broker to deliver
+	// again, possibly to another member, up to the group's delivery limit.
 	ShareActionRelease ShareAction = iota
-	// ShareActionReject marks the record as unprocessable: the broker
-	// archives it, or writes it to the dead-letter topic, without delivering
-	// it again.
+	// ShareActionReject marks the record unprocessable: the broker archives
+	// it or writes it to the group's dead-letter topic.
 	ShareActionReject
 	// ShareActionAccept acknowledges the record as if it was handled: the
 	// failure is dropped and the message is lost.
 	ShareActionAccept
 )
 
-// ShareFailurePolicy decides how a message-level ShareConsumer failure is
-// acknowledged: StageDecode, StageUnhandled, or StageHandle, while Run's ctx
-// is live. Error.Attempt is the broker's delivery count of the record. Decide
-// runs concurrently and must be safe for concurrent use. An unknown
-// ShareAction counts as ShareActionRelease.
+// ShareFailurePolicy decides how each message-level ShareConsumer failure
+// (StageDecode, StageUnhandled, or StageHandle) is acknowledged while Run's
+// ctx is live. Error.Attempt is the record's delivery count. An unknown
+// ShareAction counts as ShareActionRelease. See Share groups, and the
+// concurrency contract in Handlers, in the package documentation.
 type ShareFailurePolicy interface {
 	Decide(context.Context, Error) ShareAction
 }
@@ -47,9 +43,8 @@ func (f ShareFailurePolicyFunc) Decide(ctx context.Context, failure Error) Share
 	return f(ctx, failure)
 }
 
-// ReleaseOrRejectPolicy releases a failure DefaultRetryable retries, so the
-// broker delivers it again until its delivery limit, and rejects the others:
-// decode and unhandled failures, and errors matching ErrNonRetryable.
+// ReleaseOrRejectPolicy releases a failure DefaultRetryable accepts and
+// rejects the others.
 func ReleaseOrRejectPolicy() ShareFailurePolicy {
 	return ShareFailurePolicyFunc(func(_ context.Context, failure Error) ShareAction {
 		if DefaultRetryable(failure) {
@@ -65,20 +60,10 @@ type shareClient interface {
 	Close()
 }
 
-// ShareConsumer consumes records with a franz-go share-group client (KIP-932,
-// Kafka 4.2+), decodes them into message.Message values, routes them to
-// subscribed handlers, and acknowledges each record to the broker. It
-// implements message.Subscriber and message.Runner.
-//
-// Unlike Consumer, it does not keep any order: the records of a poll are
-// handled concurrently, and the broker may deliver records of one partition
-// to several members. Retries and dead letters are the broker's: a released
-// record is delivered again with its delivery count incremented, and a
-// rejected record, or one past the group's delivery limit, is archived or
-// written to the group's dead-letter topic when the broker supports KIP-1191
-// and the group is configured for it. The consumer itself produces nothing.
-// Choose it when messages need no order and a native dead-letter queue is
-// wanted.
+// ShareConsumer consumes a share group (KIP-932, Kafka 4.2+) in no particular
+// order and acknowledges each record to the broker, which owns retries and
+// dead letters. It implements message.Subscriber and message.Runner. See
+// Share groups in the package documentation.
 type ShareConsumer struct {
 	dispatcher
 
@@ -90,18 +75,17 @@ type ShareConsumer struct {
 	deliveryCount func(*kgo.Record) int32
 }
 
-// NewShareConsumer returns a ShareConsumer for client, which must be
-// configured with kgo.ShareGroup and kgo.ConsumeTopics. policy decides
-// message-level failures. WithPayloadResolver is required to decode payloads.
+// NewShareConsumer returns a ShareConsumer for client, which needs
+// kgo.ShareGroup and kgo.ConsumeTopics. policy decides message-level
+// failures, and WithPayloadResolver is required.
 //
 // It honors WithCodec, WithKindResolver, WithPayloadResolver, WithHeaderNames,
 // WithErrorObserver, WithHandlerTimeout, WithMaxPollRecords, WithConcurrency,
 // and WithCloseClient; the Consumer's retry and recovery options do not apply.
 //
 // It returns ErrNilFailurePolicy for a nil policy, ErrNoPayloadResolver
-// without WithPayloadResolver, and an error matching ErrInvalidClient when the
-// client has no share group. A nil client is reported later, by Run, as
-// ErrNilClient.
+// without WithPayloadResolver, and an error matching ErrInvalidClient for a
+// client without a share group. Run reports a nil client as ErrNilClient.
 func NewShareConsumer(client *kgo.Client, policy ShareFailurePolicy, opts ...Option) (*ShareConsumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -144,21 +128,10 @@ func (c *ShareConsumer) Close() {
 	}
 }
 
-// Run consumes records until ctx ends, then returns nil. It returns an error
+// Run consumes batches until ctx ends, then returns nil. It returns an error
 // when the consumer cannot continue: ErrNilClient, or a poll error with no
-// records.
-//
-// Each poll's records are handled concurrently, at most WithConcurrency at a
-// time, and every record is acknowledged before the next poll: Accept when
-// its handlers succeed, otherwise what the ShareFailurePolicy decides. Keep
-// handlers within the group's acquisition lock
-// (group.share.record.lock.duration.ms, 30s by default) with
-// WithHandlerTimeout, or the broker delivers the record again meanwhile.
-//
-// When ctx ends, records not yet handled, and records whose handlers were cut
-// short, are released for redelivery without the policy or the observer, and
-// Run flushes the acknowledgements on a ctx that is not cancelled. Call Run
-// from one goroutine only.
+// records. Call Run from one goroutine only. See Share groups and Shutdown in
+// the package documentation.
 func (c *ShareConsumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient

@@ -1,49 +1,62 @@
 // Package kafka implements github.com/go-jimu/components/ddd/message on Kafka
-// with franz-go: NewPublisher returns a message.Publisher, and Consumer is a
-// message.Subscriber and message.Runner that handles partitions concurrently,
-// commits offsets per batch, and applies a FailurePolicy to each message-level
-// failure. ShareConsumer consumes a Kafka share group instead, for messages
-// that need no order, with retries and dead letters left to the broker.
+// with franz-go: NewPublisher returns a message.Publisher, and Consumer and
+// ShareConsumer are each a message.Subscriber and message.Runner.
+//
+// # Choosing a consumer
+//
+// Choose by whether the handlers of one key need their messages in order:
+//
+//   - In order: Consumer, on a consumer group. One goroutine per partition,
+//     so the partition count bounds concurrency. A FailurePolicy retries a
+//     failed record in place or drops it; a Recoverer keeps dropped records.
+//   - Any order: ShareConsumer, on a share group (Kafka 4.2+). WithConcurrency
+//     sets concurrency. Retries and dead letters are the broker's.
 //
 // # Runtime composition
 //
 // Import this package and github.com/twmb/franz-go/pkg/kgo in runtime
-// composition only, such as an internal/pkg/messagebus package. Runtime
-// composition builds one client, the publisher, the consumer, and the payload
-// registry, and starts and stops Run. Application, domain, and transport code
-// depend on ddd/message alone: message.Publisher, message.Subscriber,
-// message.Handler, and *message.PayloadRegistry.
+// composition only, such as an internal/pkg/messagebus package. Application,
+// domain, and transport code depend on ddd/message alone: message.Publisher,
+// message.Subscriber, message.Handler, and *message.PayloadRegistry.
+//
+// Runtime composition takes these steps:
+//
+//  1. Build one client with NewClient. A Consumer client needs
+//     kgo.ConsumerGroup, kgo.DisableAutoCommit, and kgo.BlockRebalanceOnPoll;
+//     a ShareConsumer client needs kgo.ShareGroup. Either needs
+//     kgo.ConsumeTopics listing the topic of every Kind a handler subscribes
+//     to, the Kind itself by default; a Kind whose topic is missing is never
+//     delivered.
+//  2. Build a *message.PayloadRegistry, the publisher, and the consumer with
+//     WithPayloadResolver(registry). The publisher may share the consumer's
+//     client.
+//  3. Hand the publisher, the registry, and the consumer as a
+//     message.Subscriber to the bounded contexts. Before Run starts, each
+//     registers a payload factory for every Kind it consumes and subscribes
+//     its handlers.
+//  4. Start Run on its own goroutine.
+//  5. Shut down: cancel Run's ctx, wait for Run to return, then close the
+//     client after every publisher sharing it has stopped. Close closes it
+//     when WithCloseClient(true) was set.
+//
+// Composition is done when the constructor returned no error, every
+// subscribed Kind is registered and its topic consumed, and shutdown follows
+// step 5.
 //
 //	client, err := kafka.NewClient(
 //		kgo.SeedBrokers(brokers...),
 //		kgo.ConsumerGroup("orders-service"),
 //		kgo.ConsumeTopics(topics...),
-//		kgo.DisableAutoCommit(),    // the consumer commits
-//		kgo.BlockRebalanceOnPoll(), // no rebalance while a batch is handled
+//		kgo.DisableAutoCommit(),
+//		kgo.BlockRebalanceOnPoll(),
 //	)
 //	registry := message.NewPayloadRegistry()
 //	consumer, err := kafka.NewConsumer(client, kafka.RetryPolicy(kafka.RetryConfig{}),
-//		kafka.WithPayloadResolver(registry), // decodes payloads
+//		kafka.WithPayloadResolver(registry),
 //		kafka.WithHandlerTimeout(30*time.Second),
 //		kafka.WithErrorObserver(observe),
 //	)
 //	publisher := kafka.NewPublisher(client)
-//
-// NewConsumer returns an error matching ErrInvalidClient unless the client
-// has kgo.ConsumerGroup, kgo.DisableAutoCommit, and kgo.BlockRebalanceOnPoll.
-//
-// The publisher may share the consumer's client; it holds nothing of its own
-// and has no Close. Hand publisher, registry, and consumer (as a
-// message.Subscriber) to the bounded contexts. Before Run starts, each context
-// registers a payload factory for every Kind it consumes and subscribes its
-// handlers. NewConsumer requires WithPayloadResolver and returns
-// ErrNoPayloadResolver without it. A record decodes only when its Kind is
-// registered; an unregistered Kind fails at StageDecode with
-// message.ErrUnknownKind.
-//
-// kgo.ConsumeTopics fixes the topics when the client is built, so list the
-// topic of every Kind a handler subscribes to (the Kind itself, by default).
-// A Kind whose topic is missing is never delivered.
 //
 // # Mapping
 //
@@ -57,131 +70,121 @@
 // message.KindOf, that is the protobuf full name, such as
 // "user.integration.v1.UserRegisteredV1". This package creates no topics.
 //
-// The consumer rebuilds the Message from the record: Kind from the
+// The consumers rebuild the Message from the record: Kind from the
 // jimu-message-kind header (WithKindResolver for records from other
 // producers), Key from Record.Key, ID from its header or a new random ID,
 // OccurredAt from its header or Record.Timestamp, and Headers from the
-// remaining headers, without the reserved ones.
+// remaining headers. A record decodes only when its Kind is registered; an
+// unregistered Kind fails at StageDecode with message.ErrUnknownKind.
 //
-// # Choosing a FailurePolicy
+// # Handlers
 //
-// A handler error (StageHandle), a decode error (StageDecode), and a Kind with
-// no handler (StageUnhandled) are message-level failures. NewConsumer requires
-// a FailurePolicy that decides each one; Error.Attempt counts the failed
+// This contract holds for both consumers. The handlers of one record run in
+// subscription order and stop at the first error or panic. A panic is
+// recovered as a StageHandle failure whose Err is a *PanicError.
+//
+// Delivery is at least once, so make handlers idempotent, for example keyed
+// by Message.ID. Handlers, the FailurePolicy, the ShareFailurePolicy, the
+// Recoverer, and the ErrorObserver are called concurrently: make each safe for
+// concurrent use and quick to return.
+//
+// Handlers receive Run's ctx, bounded by WithHandlerTimeout when set. Return
+// promptly when ctx ends: a handler past its timeout fails with
+// ErrHandlerTimeout and the consumer moves on, while a goroutine that ignores
+// ctx keeps running alongside the retry of its record.
+//
+// # Consumer failures
+//
+// A decode error (StageDecode), a Kind with no handler (StageUnhandled), and a
+// handler error (StageHandle) are message-level failures. The FailurePolicy
+// passed to NewConsumer decides each one, given Error.Attempt, the failed
 // attempts at the record so far:
 //
-//   - RetryPolicy retries a handler failure in place: the record stays
-//     uncommitted, its partition is rewound to it and paused for the
-//     WithRetryBackoff delay (1s, doubling, up to 1 minute by default), and
-//     the record is handled again before any later record of its partition.
-//     The partition keeps its order; other partitions keep going. After
-//     MaxAttempts attempts (3 by default, counting the first) it applies
-//     OnExhausted, FailureActionDrop or FailureActionStop. Choose it for
-//     transient failures, such as a database that is briefly unavailable.
+//   - RetryPolicy retries a failure in place: the record stays uncommitted,
+//     its partition is rewound to it and paused for the WithRetryBackoff delay
+//     (DefaultRetryBackoff: 1s, doubling, up to 1 minute), and the record is
+//     handled again before any later record of its partition. After
+//     MaxAttempts attempts it applies OnExhausted: FailureActionDrop or
+//     FailureActionStop. Choose it for transient failures.
 //   - DropAndCommitPolicy drops every failure at once.
 //   - A FailurePolicyFunc decides from Error.Stage, Error.Err, and
 //     Error.Attempt.
 //
-// RetryPolicy does not retry a failure a retry cannot fix: by default
-// (DefaultRetryable) decode and unhandled failures, and any error matching
-// ErrNonRetryable. A handler marks a permanent failure, such as invalid input,
-// by returning NonRetryable(err). A handler timeout (ErrHandlerTimeout) and a
-// recovered panic (ErrHandlerPanic) are retried like any handler error.
+// RetryPolicy spends attempts only on failures DefaultRetryable accepts:
+// StageHandle errors, including ErrHandlerTimeout and ErrHandlerPanic. A
+// handler marks a permanent failure, such as invalid input, by returning
+// NonRetryable(err); it goes to OnExhausted at once, as decode and unhandled
+// failures do.
 //
-// A record retried in place holds up its partition until it succeeds or is
-// given up, so a record that always fails delays the records behind it by the
-// sum of its backoffs.
+// A record retried in place holds up the rest of its partition until it is
+// settled, so a record that always fails delays the records behind it by the
+// sum of its backoffs. Attempts are counted in memory for the head of each
+// partition; a restart, or the partition moving to another member, counts
+// from 1 again.
 //
-// # Dead letters
+// # Recoverer
 //
-// This package publishes no retry or dead-letter records. A dead-letter queue
-// is a broker feature of Kafka share groups (KIP-1191), which give up the
-// per-partition order that this Consumer keeps.
+// The Consumer keeps dropped records through the Recoverer set with
+// WithRecoverer, for example in a failed-messages table; it publishes no retry
+// or dead-letter records. The Recoverer gets a dropped record, as an Error
+// with Final set, before its offset is committed. When it returns nil the
+// record is settled. When it returns an error, the failure is observed at
+// StageRecover, matching ErrRecoverFailed, and the record stays at the head of
+// its partition: after the backoff the Recoverer is called again, without the
+// handlers. Alert on StageRecover, since the partition waits meanwhile.
+// Without a Recoverer a dropped message is lost, and the ErrorObserver sees
+// its Error with Final set.
 //
-// When the FailurePolicy drops a record, the Recoverer set with WithRecoverer
-// gets it first, as an Error with Final set and the source Record, for example
-// to save it in a failed-messages table. The offset is committed only after
-// the Recoverer returns nil. When it returns an error, the record stays
-// uncommitted, the failure is observed at StageRecover matching
-// ErrRecoverFailed, and after the backoff the Recoverer is called again,
-// without running the handlers again. The partition waits meanwhile, so alert
-// on StageRecover. Without a Recoverer a dropped message is lost; the
-// ErrorObserver still sees its Error with Final set.
+// # Consumer offsets and rebalances
+//
+// A batch is the records of one poll, at most WithMaxPollRecords
+// (DefaultMaxPollRecords). The Consumer splits a batch by partition and
+// handles the partitions concurrently, each in offset order, until the head
+// of the partition is a record that is not settled. A record is settled when
+// its handlers succeed, or when it is dropped and the Recoverer, if any,
+// returned nil.
+//
+// After the whole batch, the Consumer commits each partition's settled
+// records in one commit, pauses the partitions waiting for a backoff, rewinds
+// each partition with records left to its head, and then allows the group to
+// rebalance. kgo.BlockRebalanceOnPoll holds rebalances until then, so every
+// commit is for a partition still assigned. The price: a batch must finish
+// within the client's kgo.RebalanceTimeout, and its slowest partition holds up
+// the commit and rebalance of all. Bound it with WithHandlerTimeout and
+// WithMaxPollRecords.
 //
 // # Share groups
 //
-// ShareConsumer consumes with a kgo.ShareGroup client (KIP-932, generally
-// available from Kafka 4.2). The broker hands each record to one member and
-// tracks its delivery count; members are not tied to partitions, so
-// WithConcurrency, not the partition count, sets how many records are
-// handled at once, and nothing is kept in order. Each record is acknowledged
-// before the next poll: accepted when its handlers succeed, otherwise as the
-// ShareFailurePolicy decides. ReleaseOrRejectPolicy releases a retryable
-// failure, which the broker delivers again until the group's
-// share.delivery.count.limit (5 by default), and rejects the others. The
-// broker archives a rejected or exhausted record, or writes it to the group's
-// dead-letter topic when it supports KIP-1191 (share.version 2) and the group
-// is configured for one. Error.Attempt is the delivery count.
+// The ShareConsumer handles each batch with at most WithConcurrency handlers
+// at once and acknowledges every record before the next poll: accepted when
+// its handlers succeed, otherwise as the ShareFailurePolicy decides.
+// ReleaseOrRejectPolicy releases a failure DefaultRetryable accepts and
+// rejects the others. The broker delivers a released record again, with
+// Error.Attempt, the delivery count, incremented, up to the group's
+// share.delivery.count.limit (5 by default). It archives a rejected or
+// exhausted record, or writes it to the group's dead-letter topic when it
+// supports KIP-1191 (share.version 2) and the group is configured for one.
 //
-// A new share group starts at the latest offset; set the group config
-// share.auto.offset.reset to earliest to consume existing records. Keep
-// handlers within the group's acquisition lock (share.record.lock.duration.ms,
-// 30s by default) with WithHandlerTimeout, or the broker delivers the record
-// again meanwhile.
+// Configure the share group on the broker: set share.auto.offset.reset to
+// earliest to consume records that predate the group, and keep
+// WithHandlerTimeout below share.record.lock.duration.ms (30s by default), the
+// time after which the broker delivers a held record again.
 //
-// # Offsets and rebalances
+// # Shutdown
 //
-// Each poll takes at most WithMaxPollRecords records (DefaultMaxPollRecords by
-// default) and splits them by partition. Partitions are handled concurrently,
-// each in offset order. A partition stops at its first record that is not
-// settled, that is, handled, or dropped and recovered. When the whole batch
-// is done, Run commits every partition's settled records in one commit,
-// rewinds each partition with records left to the first of them, pauses the
-// partitions that wait for a backoff, and only then lets the group rebalance
-// (kgo.BlockRebalanceOnPoll). So no record is committed for a partition that
-// was revoked meanwhile, and no partition is rebalanced away mid-batch.
-//
-// The price of blocked rebalances is that a batch must be done within the
-// client's kgo.RebalanceTimeout, and the slowest partition holds up the
-// commit and rebalance of the whole batch. Bound it with WithHandlerTimeout
-// and WithMaxPollRecords.
-//
-// Attempts are counted in memory, per partition, for the record at its head.
-// A restart or a partition that moves to another member starts counting
-// again, so a record may get more than MaxAttempts attempts in total.
-//
-// # Consumer.Run lifecycle
-//
-// Run passes its own ctx to the handlers, or a ctx bounded by
-// WithHandlerTimeout. The handlers of one record run in subscription order and
-// stop at the first error or panic. Run recovers a handler panic as a
-// StageHandle failure whose Err is a *PanicError, matching ErrHandlerPanic;
-// the ErrorObserver can log PanicError.Stack. A handler that overruns
-// WithHandlerTimeout fails with ErrHandlerTimeout; Go cannot stop it, so a
-// handler that ignores ctx keeps running while the record is retried. Delivery
-// is at least once, so make handlers idempotent, for example keyed by
-// Message.ID.
-//
-// The handlers, the FailurePolicy, the Recoverer, and the ErrorObserver are
-// called concurrently for different partitions and must be safe for
-// concurrent use.
-//
-// When ctx ends, each partition stops before its next record, Run commits the
-// records already settled on a ctx that is not cancelled, and returns nil. A
-// failure that happens after ctx ended, such as a handler cut short by
-// shutdown, skips the FailurePolicy and the ErrorObserver and leaves the
-// record uncommitted, so Kafka redelivers it. Run lists the errors that stop
-// it early; treat them as fatal and stop or restart the process.
-//
-// Shut down in this order: cancel Run's ctx, wait for Run to return, then close
-// the client after every publisher sharing it has stopped. Consumer.Close
-// closes the client when WithCloseClient(true) was set; otherwise runtime
-// composition closes it with client.Close.
+// When Run's ctx ends, the Consumer stops each partition before its next
+// record and commits the settled records; the ShareConsumer releases the
+// records it has not handled and flushes its acknowledgements. Both then
+// return nil. A failure that happens after ctx ended, such as a handler cut
+// short, is left for redelivery without the policy or the ErrorObserver.
+// Commits and acknowledgement flushes run on a ctx detached from Run's,
+// bounded by a timeout, so shutdown completes them. Run lists the errors that
+// stop it early; treat them as fatal and stop or restart the process.
 //
 // # Errors
 //
-// The FailurePolicy, the Recoverer, and the ErrorObserver receive an Error
-// value. Compare Error.Err, and the errors returned by Run and Publish, with
+// The policies, the Recoverer, and the ErrorObserver receive an Error value.
+// Compare Error.Err, and the errors returned by Run and Publish, with
 // errors.Is against the Err* sentinels of this package and of ddd/message.
 //
 // The upstream ddd/message API is experimental. When this adapter shows that

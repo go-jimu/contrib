@@ -34,13 +34,14 @@ const (
 	StageCommit Stage = "commit"
 )
 
-// Error describes one consumer failure for a FailurePolicy, a Recoverer, and
-// an ErrorObserver. Record is the source record, nil for StagePoll; Message is
+// Error describes one consumer failure for the policies, the Recoverer, and
+// the ErrorObserver. Record is the source record, nil for StagePoll; Message is
 // the decoded message, zero before decoding succeeds; Err is the cause.
 //
 // Attempt counts the failed attempts at this record, starting at 1: for the
 // Consumer, attempts since this process started handling the record at the
-// head of its partition; for the ShareConsumer, the broker's delivery count.
+// head of its partition (see Consumer failures in the package documentation);
+// for the ShareConsumer, the broker's delivery count.
 // Final reports that no further attempt follows: the policy chose to drop the
 // record or stop. The FailurePolicy sees Final false, as it decides it.
 //
@@ -58,8 +59,8 @@ type Error struct {
 // Errors returned by this package. Compare with errors.Is: they are often
 // wrapped with the underlying cause.
 var (
-	// ErrNilClient means NewPublisher or NewConsumer received a nil client;
-	// Publish and Run return it.
+	// ErrNilClient means a constructor received a nil client; Publish and Run
+	// return it.
 	ErrNilClient = errors.New("kafka client is nil")
 	// ErrNilRecord means a failure carried no source record.
 	ErrNilRecord = errors.New("kafka record is nil")
@@ -73,13 +74,14 @@ var (
 	// ErrNoKind means a consumed record has no message kind header, or the
 	// KindResolver returned "". The record fails at StageDecode.
 	ErrNoKind = errors.New("message kind is empty")
-	// ErrNoPayloadResolver means NewConsumer was called without
-	// WithPayloadResolver.
+	// ErrNoPayloadResolver means NewConsumer or NewShareConsumer was called
+	// without WithPayloadResolver.
 	ErrNoPayloadResolver = errors.New("payload resolver is not configured")
 	// ErrUnhandledMessage is not returned by this version; an unhandled kind
 	// fails at StageUnhandled with message.ErrUnhandledKind.
 	ErrUnhandledMessage = errors.New("message is unhandled")
-	// ErrNilFailurePolicy means NewConsumer received a nil FailurePolicy.
+	// ErrNilFailurePolicy means NewConsumer or NewShareConsumer received a nil
+	// policy.
 	ErrNilFailurePolicy = errors.New("kafka failure policy is nil")
 	// ErrInvalidClient means NewConsumer or NewShareConsumer received a
 	// client without the options it requires; the error names them.
@@ -102,7 +104,7 @@ var (
 	ErrHandlerPanic = errors.New("message handler panicked")
 )
 
-// PanicError is the Error.Err of a handler panic that the consumer recovered.
+// PanicError is the Error.Err of a recovered handler panic.
 // Value is what the handler passed to panic and Stack the goroutine stack at
 // the panic; read them with errors.As, for example to log the stack in an
 // ErrorObserver. It matches ErrHandlerPanic and, when Value is an error, that
