@@ -1,30 +1,62 @@
 name: CI
+# A merged pull request is tested and released once, by the push to master it
+# creates. Pull request runs test the change only.
 on:
   push:
-    tags:
-    - 'v[0-9]+.[0-9]+.[0-9]+'
     branches:
     - master
   pull_request:
     branches:
     - master
-    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: write
 
+# A new push to a pull request supersedes its running checks. Master runs
+# queue one at a time, so two releases never pick the same tag; a queued run
+# replaced by a newer one is released by that newer run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  code-coverage:
-    needs: unittest
-    runs-on: ubuntu-latest
+  unittest:
+    runs-on: ${{matrix.os}}
     steps:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v4
-      - name: Download code coverage report
-        uses: actions/download-artifact@v4
+      - name: Set up Go 1.x
+        id: setup-go
+        uses: actions/setup-go@v5
         with:
-          name: code-coverage-report
+          go-version: ${{matrix.go-version}}
+          # Caching is done below: setup-go keys its cache on go.sum alone, so
+          # the first build cache saved for a go.sum is reused, never refreshed.
+          cache: false
+      # Each master run saves a fresh build cache under its commit; every run
+      # restores the newest one for its Go version and go.sum files.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}-
+            go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-
+      - name: Unittest
+        run: make test
+      - name: Save Go build cache
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
       - name: Code Coverage Report
+        if: ${{ matrix.go-version == '1.26.x' }}
         uses: codecov/codecov-action@v5
         with:
           fail_ci_if_error: true
@@ -32,48 +64,23 @@ jobs:
           flags: unittest
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
-  unittest:
-    runs-on: ${{matrix.os}}
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'closed' || github.event.pull_request.merged == true }}
-    steps:
-      - name: Check out code into the Go module directory
-        uses: actions/checkout@v4
-      - name: Set up Go 1.x
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{matrix.go-version}}
-          # The root module has no go.sum; key the module and build cache on
-          # every provider module's go.sum.
-          cache-dependency-path: "**/go.sum"
-      - name: Unittest
-        run: make test
-      - if: ${{ matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26.x' }}
-        name: Upload code coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: code-coverage-report
-          path: coverage.txt
     strategy:
       fail-fast: true
       matrix:
         go-version: [1.26.x, 1.27.x]
         os: [ubuntu-latest]
-  release_sub_packages:
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
-    uses: ./.github/workflows/release-packages.yml
-    with:
-      root_tag: ${{ github.ref_name }}
+  # Releases a merged pull request: autotag reads the source branch from the
+  # merge commit message. Direct pushes to master are tested, not released.
   auto_release:
     needs: unittest
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true }}
+    if: ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Merge pull request ') }}
     outputs:
       new_tag: ${{ steps.autotag.outputs.new_tag }}
     steps:
-    - name: Check out master
+    - name: Check out the merge commit
       uses: actions/checkout@v4
       with:
-        ref: master
         fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
     - name: Auto Tag
