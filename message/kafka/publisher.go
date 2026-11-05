@@ -16,6 +16,16 @@ type publisher struct {
 	cfg    config
 }
 
+// NewPublisher returns a message.Publisher that produces to Kafka through
+// client, which may be the consumer's client. Runtime composition owns and
+// closes the client; the publisher has no Close. It honors WithCodec,
+// WithTopicResolver, WithHeaderNames, and WithPublishRetry.
+//
+// Publish maps the message to a record and produces it synchronously,
+// returning after the broker acknowledges it under the client's acks setting.
+// It returns ErrNilClient for a nil client, ErrNilPayload or ErrNoTopic (or the
+// resolver's error) before producing, and otherwise the last franz-go produce
+// error. Publish is safe for concurrent use.
 func NewPublisher(client *kgo.Client, opts ...Option) message.Publisher {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -70,6 +80,8 @@ func (p *publisher) Publish(ctx context.Context, msg message.Message) error {
 	return publishErr
 }
 
+// NewClient calls kgo.NewClient. A consuming client needs kgo.ConsumerGroup,
+// kgo.ConsumeTopics, and kgo.DisableAutoCommit.
 func NewClient(opts ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(opts...)
 }

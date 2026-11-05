@@ -83,12 +83,8 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatalf("kind resolver kind = %q, want %q", kind, "order.payment.v1.OrderPaid")
 	}
 
-	payload, err := cfg.payloadResolver.Resolve("order.payment.v1.OrderPaid")
-	if !errors.Is(err, ErrNoPayloadResolver) {
-		t.Fatalf("payload resolver error = %v, want %v", err, ErrNoPayloadResolver)
-	}
-	if payload != nil {
-		t.Fatalf("payload resolver payload = %#v, want nil", payload)
+	if cfg.payloadResolver != nil {
+		t.Fatalf("payload resolver = %#v, want nil until WithPayloadResolver", cfg.payloadResolver)
 	}
 
 	if cfg.errorObserver != nil {

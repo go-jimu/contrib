@@ -9,6 +9,10 @@ import (
 	hibiken "github.com/hibiken/asynq"
 )
 
+// ProcessorRouter is an asynq.Handler that converts asynq tasks to
+// taskqueue tasks and routes them to registered processors. Use it to serve
+// processors from an asynq.Server you build and start yourself; Worker uses
+// one internally. It is safe for concurrent use.
 type ProcessorRouter struct {
 	router   *taskqueue.Router
 	metadata executionMetadataSource
@@ -19,6 +23,7 @@ var (
 	_ hibiken.Handler     = (*ProcessorRouter)(nil)
 )
 
+// NewProcessorRouter returns a ProcessorRouter with no processors.
 func NewProcessorRouter() *ProcessorRouter {
 	return newProcessorRouter(defaultExecutionMetadataSource())
 }
@@ -30,10 +35,17 @@ func newProcessorRouter(metadata executionMetadataSource) *ProcessorRouter {
 	}
 }
 
+// Register adds processor for its task type and returns the taskqueue.Router
+// errors.
 func (r *ProcessorRouter) Register(processor taskqueue.Processor) error {
 	return r.router.Register(processor)
 }
 
+// ProcessTask converts task, stores taskqueue.ExecutionInfo in ctx, and runs
+// the processor for its type. It returns the processor's error; an error
+// wrapping taskqueue.ErrSkipRetry is returned wrapped with asynq.SkipRetry as
+// well, so asynq archives the task without retrying. A type with no processor
+// returns taskqueue.ErrUnhandledType, and a nil task ErrNilTask.
 func (r *ProcessorRouter) ProcessTask(ctx context.Context, task *hibiken.Task) error {
 	ctx = contextWithExecutionInfo(ctx, r.metadata)
 	componentTask, err := taskFromAsynq(ctx, task)

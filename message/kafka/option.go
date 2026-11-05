@@ -9,17 +9,27 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// TopicResolver returns the topic a message is published to. The default
+// returns the Kind string. An error or "" fails Publish.
 type TopicResolver func(message.Message) (string, error)
+
+// KindResolver returns the message Kind of a consumed record. The default
+// reads the jimu-message-kind header. An error or "" fails the record at
+// StageDecode.
 type KindResolver func(*kgo.Record) (message.Kind, error)
 
 // PayloadResolver is the upstream transport-neutral message payload resolver.
+// A *message.PayloadRegistry is the usual value.
 type PayloadResolver = message.PayloadResolver
 
 // Deprecated: use ErrorObserver. ErrorHandler return values no longer control
 // message-level failure flow.
 type ErrorHandler func(context.Context, Error) error
 
-// ErrorObserver observes provider failures without controlling consumer flow.
+// ErrorObserver observes provider failures without controlling consumer flow,
+// for logging and metrics. It runs on the Run goroutine for every failure,
+// including failures the policy then drops, so keep it fast. A message-level
+// failure after Run's ctx ended is left for redelivery and not observed.
 type ErrorObserver func(context.Context, Error)
 
 // FailureTopicResolver resolves the retry or DLQ topic for a failed source record.
@@ -31,6 +41,8 @@ type RetryPolicy struct {
 	Retryable   func(Error) bool
 }
 
+// FailurePublishFallback chooses what happens when a retry or DLQ record
+// cannot be resolved or published.
 type FailurePublishFallback int
 
 const (
@@ -43,8 +55,12 @@ const (
 // PublishBackoff returns the delay before the next publish retry attempt.
 type PublishBackoff func(attempt int) time.Duration
 
+// Option configures NewPublisher and NewConsumer. Each option notes which of
+// the two it affects; the other ignores it.
 type Option func(*config)
 
+// HeaderNames are the reserved record headers that carry message metadata.
+// Publisher and consumer must use the same names.
 type HeaderNames struct {
 	MessageID   string
 	MessageKind string
@@ -78,7 +94,6 @@ func defaultConfig() config {
 		topicResolver:       defaultTopicResolver,
 		kindResolver:        defaultKindResolver(defaultHeaderNames()),
 		defaultKindResolver: true,
-		payloadResolver:     defaultPayloadResolver,
 		failureFallback:     FailurePublishFallbackStop,
 		publishRetry:        publishRetryConfig{maxAttempts: 1, sleep: sleepContext},
 		headerNames:         defaultHeaderNames(),
@@ -116,10 +131,6 @@ func defaultKindResolver(headers HeaderNames) KindResolver {
 		return "", ErrNoKind
 	}
 }
-
-var defaultPayloadResolver PayloadResolver = message.PayloadResolverFunc(func(message.Kind) (proto.Message, error) {
-	return nil, ErrNoPayloadResolver
-})
 
 // Deprecated: use RetryThenDLQPolicy with NewConsumer.
 func defaultRetryPolicy() RetryPolicy {
@@ -174,6 +185,8 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// WithCodec replaces the protobuf codec for payloads, for the publisher and
+// the consumer. A nil codec is ignored.
 func WithCodec(codec Codec) Option {
 	return func(cfg *config) {
 		if codec != nil {
@@ -182,6 +195,8 @@ func WithCodec(codec Codec) Option {
 	}
 }
 
+// WithTopicResolver sets the publisher's message-to-topic mapping. A nil
+// resolver is ignored.
 func WithTopicResolver(resolver TopicResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -190,6 +205,8 @@ func WithTopicResolver(resolver TopicResolver) Option {
 	}
 }
 
+// WithKindResolver sets how the consumer derives a record's Kind, for records
+// written by producers other than this package. A nil resolver is ignored.
 func WithKindResolver(resolver KindResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -199,6 +216,9 @@ func WithKindResolver(resolver KindResolver) Option {
 	}
 }
 
+// WithPayloadResolver sets the consumer's payload resolver, usually a
+// *message.PayloadRegistry. NewConsumer requires it and returns
+// ErrNoPayloadResolver without it. A nil resolver is ignored.
 func WithPayloadResolver(resolver PayloadResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -215,6 +235,8 @@ func WithPayloadResolverFunc(resolver func(message.Kind) (proto.Message, error))
 	return WithPayloadResolver(message.PayloadResolverFunc(resolver))
 }
 
+// WithErrorObserver sets the consumer's ErrorObserver. A nil observer is
+// ignored.
 func WithErrorObserver(observer ErrorObserver) Option {
 	return func(cfg *config) {
 		if observer != nil {
@@ -245,6 +267,9 @@ func WithDLQDisabled() Option {
 	return func(*config) {}
 }
 
+// WithDefaultFailureTopics makes the consumer publish retry records to
+// <source-topic>.retry and DLQ records to <source-topic>.dlq, where the source
+// topic is the original topic of a record consumed from a retry topic.
 func WithDefaultFailureTopics() Option {
 	return func(cfg *config) {
 		cfg.retryTopicResolver = defaultRetryTopicResolver
@@ -252,6 +277,8 @@ func WithDefaultFailureTopics() Option {
 	}
 }
 
+// WithRetryTopicResolver sets the consumer's retry topic. A nil resolver is
+// ignored.
 func WithRetryTopicResolver(resolver FailureTopicResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -260,6 +287,8 @@ func WithRetryTopicResolver(resolver FailureTopicResolver) Option {
 	}
 }
 
+// WithDLQTopicResolver sets the consumer's DLQ topic. A nil resolver is
+// ignored.
 func WithDLQTopicResolver(resolver FailureTopicResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -268,12 +297,19 @@ func WithDLQTopicResolver(resolver FailureTopicResolver) Option {
 	}
 }
 
+// WithFailurePublishFallback sets what the consumer does when a retry or DLQ
+// record cannot be resolved or published. The default,
+// FailurePublishFallbackStop, stops Run without committing.
 func WithFailurePublishFallback(fallback FailurePublishFallback) Option {
 	return func(cfg *config) {
 		cfg.failureFallback = fallback
 	}
 }
 
+// WithPublishRetry makes Publish try a failed produce up to maxAttempts times
+// in total, waiting backoff(attempt) between attempts or until ctx ends. A
+// maxAttempts of 1 or less keeps one attempt; a nil backoff retries at once.
+// It affects the publisher only, not retry or DLQ records.
 func WithPublishRetry(maxAttempts int, backoff PublishBackoff) Option {
 	return func(cfg *config) {
 		if maxAttempts > 1 {
@@ -283,12 +319,15 @@ func WithPublishRetry(maxAttempts int, backoff PublishBackoff) Option {
 	}
 }
 
+// WithCloseClient makes Consumer.Close close the franz-go client.
 func WithCloseClient(closeClient bool) Option {
 	return func(cfg *config) {
 		cfg.closeClient = closeClient
 	}
 }
 
+// WithHeaderNames replaces the reserved metadata header names for the
+// publisher and the default kind resolver. A zero HeaderNames is ignored.
 func WithHeaderNames(headers HeaderNames) Option {
 	return func(cfg *config) {
 		if headers == (HeaderNames{}) {

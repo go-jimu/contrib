@@ -230,7 +230,7 @@ func TestConsumerRunStopsOnPollErrorWithoutRecords(t *testing.T) {
 
 // Intent: a consumer without a poll-capable client should fail fast instead of panicking or blocking.
 func TestConsumerRunReturnsErrNilClient(t *testing.T) {
-	consumer, err := NewConsumer(nil, DropAndCommitPolicy())
+	consumer, err := NewConsumer(nil, DropAndCommitPolicy(), WithPayloadResolver(message.NewPayloadRegistry()))
 	if err != nil {
 		t.Fatalf("NewConsumer returned error: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -20,6 +21,10 @@ type pollClient interface {
 	PollFetches(context.Context) kgo.Fetches
 }
 
+// Consumer consumes records with a franz-go consumer-group client, decodes
+// them into message.Message values, routes them to subscribed handlers, and
+// commits offsets. It implements message.Subscriber and message.Runner. The
+// package documentation describes its failure handling and lifecycle.
 type Consumer struct {
 	client        pollClient
 	failurePolicy FailurePolicy
@@ -27,6 +32,14 @@ type Consumer struct {
 	router        *message.Router
 }
 
+// NewConsumer returns a Consumer for client, which must be configured with
+// kgo.ConsumerGroup, kgo.ConsumeTopics, and kgo.DisableAutoCommit. policy
+// decides message-level failures. WithPayloadResolver is required to decode
+// payloads; pass failure topic options too when policy retries or uses DLQ.
+//
+// It returns ErrNilFailurePolicy for a nil policy and ErrNoPayloadResolver
+// without WithPayloadResolver. A nil client is reported later, by Run, as
+// ErrNilClient. NewConsumer starts nothing.
 func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Consumer, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -46,6 +59,9 @@ func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer
 	if policy == nil {
 		return nil, ErrNilFailurePolicy
 	}
+	if cfg.payloadResolver == nil {
+		return nil, ErrNoPayloadResolver
+	}
 	return &Consumer{
 		client:        client,
 		failurePolicy: policy,
@@ -54,16 +70,29 @@ func newConsumer(client pollClient, policy FailurePolicy, cfg config) (*Consumer
 	}, nil
 }
 
+// Subscribe registers handler with a message.Router; see message.Router.Subscribe
+// for its errors. Subscribe every handler before Run starts: a record whose
+// Kind has no handler fails at StageUnhandled.
 func (c *Consumer) Subscribe(handler message.Handler) error {
 	return c.router.Subscribe(handler)
 }
 
+// Close closes the franz-go client when WithCloseClient(true) was set, and
+// does nothing otherwise. Call it after Run has returned.
 func (c *Consumer) Close() {
 	if c.cfg.closeClient && c.client != nil {
 		c.client.Close()
 	}
 }
 
+// Run consumes records until ctx ends, then returns nil. It returns an error
+// when the consumer cannot continue: ErrNilClient, a poll error with no
+// records, an error matching ErrCommitFailed, or, under
+// FailurePublishFallbackStop, one matching ErrRetryPublishFailed or
+// ErrDLQPublishFailed. A message-level failure after ctx ended skips the
+// FailurePolicy and leaves the record uncommitted for redelivery. Run handles
+// one record at a time on the calling goroutine; call it from one goroutine
+// only.
 func (c *Consumer) Run(ctx context.Context) error {
 	err := c.run(ctx)
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
@@ -125,9 +154,9 @@ func (c *Consumer) processRecord(ctx context.Context, record *kgo.Record) error 
 		})
 	}
 
-	if err = c.router.Handle(ctx, msg); err != nil {
+	if err = c.handle(ctx, msg); err != nil {
 		stage := StageHandle
-		if errors.Is(err, message.ErrUnhandledKind) {
+		if !errors.Is(err, ErrHandlerPanic) && errors.Is(err, message.ErrUnhandledKind) {
 			stage = StageUnhandled
 		}
 		return c.handleFailure(ctx, Error{
@@ -141,7 +170,24 @@ func (c *Consumer) processRecord(ctx context.Context, record *kgo.Record) error 
 	return c.commit(ctx, record)
 }
 
+// handle routes msg to its handlers and recovers a handler panic as a
+// *PanicError, so it follows the failure policy instead of ending the process.
+func (c *Consumer) handle(ctx context.Context, msg message.Message) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &PanicError{Value: recovered, Stack: debug.Stack()}
+		}
+	}()
+	return c.router.Handle(ctx, msg)
+}
+
 func (c *Consumer) handleFailure(ctx context.Context, failure Error) error {
+	// Once Run's ctx has ended, leave the record undecided and uncommitted so
+	// Kafka redelivers it: the failure may stem from the ended ctx, and any
+	// publish or commit would run on it. Run treats the ctx error as shutdown.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.observe(ctx, failure)
 	decision := failureAction(ctx, failure, c.failurePolicy, c.cfg)
 	if decision.err != nil {
