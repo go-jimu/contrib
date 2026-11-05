@@ -209,8 +209,9 @@ consumer, err := kafka.NewConsumer(client, policy,
 )
 ```
 
-The messages and attributes are listed under "Logging" in the package
-documentation.
+To log every handled message at Debug, subscribe
+`message.Chain(handler, message.Logging(logger))`. The messages and attributes
+are listed under "Logging" in the package documentation.
 
 ## Publisher Retry
 

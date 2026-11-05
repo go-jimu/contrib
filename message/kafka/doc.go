@@ -246,8 +246,9 @@
 //     batch_partitions, committed_records, elapsed_ms), "kafka partition
 //     paused", and "kafka partition resumed".
 //
-// A handled message is not logged here; log it from a handler or a
-// middleware.
+// A handled message is not logged here. To log each one at Debug, subscribe
+// handlers wrapped as message.Chain(handler, message.Logging(logger)); its
+// failure log is Debug too, since the logs above give a failure its level.
 //
 // # Errors
 //
