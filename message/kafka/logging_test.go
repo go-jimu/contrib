@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,8 @@ type logEntry struct {
 	level slog.Level
 	msg   string
 	attrs map[string]slog.Value
+	// caller is the function slog reports as the record's source.
+	caller string
 }
 
 // logRecorder is a slog.Handler that keeps every record, for asserting levels
@@ -36,6 +39,9 @@ func (r *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (r *logRecorder) Handle(_ context.Context, rec slog.Record) error {
 	e := logEntry{level: rec.Level, msg: rec.Message, attrs: map[string]slog.Value{}}
+	if src := rec.Source(); src != nil {
+		e.caller = src.Function
+	}
 	for _, a := range r.attrs {
 		e.attrs[a.Key] = a.Value
 	}
@@ -344,6 +350,89 @@ func TestKgoLogger(t *testing.T) {
 		logs.one(t, want, msg, map[string]string{"broker": "1"})
 	}
 }
+
+// kgoLogFromWrapper stands in for franz-go's own logger wrapper, which sits
+// between a franz-go call site and KgoLogger.
+func kgoLogFromWrapper(l kgo.Logger, msg string) {
+	l.Log(kgo.LogLevelInfo, msg)
+}
+
+// Intent: a franz-go log names the franz-go function that logged it as its
+// source, skipping franz-go's logger wrapper and KgoLogger itself, so the
+// source of every kgo log is not the adapter's one line.
+func TestKgoLoggerSource(t *testing.T) {
+	logs := newLogRecorder()
+	adapted := kgoLogger{logger: slog.New(logs), level: kgo.LogLevelInfo,
+		skip: append(slices.Clone(kgoLogSkip), pkgPath+".kgoLogFromWrapper")}
+
+	adapted.Log(kgo.LogLevelInfo, "direct")
+	kgoLogFromWrapper(adapted, "wrapped")
+
+	want := pkgPath + ".TestKgoLoggerSource"
+	for _, msg := range []string{"direct", "wrapped"} {
+		if got := logs.one(t, slog.LevelInfo, msg, nil).caller; got != want {
+			t.Errorf("%q source = %s, want %s", msg, got, want)
+		}
+	}
+}
+
+// Intent: with a real franz-go client, every log's source is franz-go code,
+// past its logger wrapper. No broker is needed: dialing a closed port logs.
+func TestKgoLoggerSourceWithClient(t *testing.T) {
+	logs := newLogRecorder()
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers("127.0.0.1:1"),
+		kgo.WithLogger(KgoLogger(slog.New(logs), kgo.LogLevelDebug)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = client.Ping(ctx)
+	client.Close()
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if len(*logs.entries) == 0 {
+		t.Fatal("franz-go logged nothing")
+	}
+	for _, e := range *logs.entries {
+		if !strings.HasPrefix(e.caller, "github.com/twmb/franz-go/pkg/kgo.") ||
+			strings.Contains(e.caller, "wrappedLogger") {
+			t.Errorf("%q source = %q, want a franz-go call site", e.msg, e.caller)
+		}
+	}
+}
+
+// Intent: the consumers' own logs name the consumer code that logged them,
+// not a shared logging helper.
+func TestConsumerLogSources(t *testing.T) {
+	logs := newLogRecorder()
+	h := newHarness(t, DropAndCommitPolicy(), WithLogger(slog.New(logs)))
+	h.subscribe(func(context.Context, message.Message) error { return nil })
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+	share := newShareHarness(t, ReleaseOrRejectPolicy(), WithLogger(slog.New(logs)))
+	share.subscribe(func(context.Context, message.Message) error { return nil })
+	if err := share.run(); err != nil {
+		t.Fatalf("share Run error = %v", err)
+	}
+
+	for msg, want := range map[string]string{
+		"kafka consumer started":       pkgPath + ".(*Consumer).Run",
+		"kafka consumer stopped":       pkgPath + ".(*Consumer).Run",
+		"kafka share consumer started": pkgPath + ".(*ShareConsumer).Run",
+		"kafka share consumer stopped": pkgPath + ".(*ShareConsumer).Run",
+	} {
+		if got := logs.one(t, slog.LevelInfo, msg, nil).caller; got != want {
+			t.Errorf("%q source = %s, want %s", msg, got, want)
+		}
+	}
+}
+
+const pkgPath = "github.com/go-jimu/contrib/message/kafka"
 
 // Intent: without WithLogger the consumers log to slog.Default(), and a nil
 // logger keeps it.

@@ -3,6 +3,9 @@ package kafka
 import (
 	"context"
 	"log/slog"
+	"runtime"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-jimu/components/sloghelper"
@@ -49,19 +52,28 @@ func durationMillis(key string, d time.Duration) slog.Attr {
 
 // KgoLogger adapts logger to kgo.Logger, for kgo.WithLogger, so that the
 // franz-go client's own logs (group joins, partition assignments, broker
-// connections) reach the same place as the consumers'. level is the most
-// verbose franz-go level to log; kgo.LogLevelInfo suits production, since
+// connections) reach the same place as the consumers'. Each record's source
+// is the franz-go function that logged it. level is the most verbose
+// franz-go level to log; kgo.LogLevelInfo suits production, since
 // kgo.LogLevelDebug logs every request. A nil logger means slog.Default().
 func KgoLogger(logger *slog.Logger, level kgo.LogLevel) kgo.Logger {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return kgoLogger{logger: logger, level: level}
+	return kgoLogger{logger: logger, level: level, skip: kgoLogSkip}
+}
+
+// kgoLogSkip names the functions between a franz-go call site and slog:
+// this adapter and franz-go's own logger wrapper.
+var kgoLogSkip = []string{
+	"github.com/go-jimu/contrib/message/kafka.kgoLogger.",
+	"github.com/twmb/franz-go/pkg/kgo.(*wrappedLogger).",
 }
 
 type kgoLogger struct {
 	logger *slog.Logger
 	level  kgo.LogLevel
+	skip   []string
 }
 
 func (l kgoLogger) Level() kgo.LogLevel { return l.level }
@@ -78,7 +90,30 @@ func (l kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...any) {
 	default:
 		slogLevel = slog.LevelDebug
 	}
-	l.logger.Log(context.Background(), slogLevel, msg, keyvals...)
+	ctx := context.Background()
+	if !l.logger.Enabled(ctx, slogLevel) {
+		return
+	}
+	record := slog.NewRecord(time.Now(), slogLevel, msg, callerPC(l.skip))
+	record.Add(keyvals...)
+	_ = l.logger.Handler().Handle(ctx, record)
+}
+
+// callerPC returns the program counter of the nearest caller whose function
+// matches no prefix in skip, for a record's source; 0, no source, when the
+// stack holds no such caller.
+func callerPC(skip []string) uintptr {
+	var pcs [32]uintptr
+	n := runtime.Callers(2, pcs[:]) // skip runtime.Callers and callerPC
+	for _, pc := range pcs[:n] {
+		frame, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+		if !slices.ContainsFunc(skip, func(prefix string) bool {
+			return strings.HasPrefix(frame.Function, prefix)
+		}) {
+			return pc
+		}
+	}
+	return 0
 }
 
 func loggerOrDefault(logger *slog.Logger) *slog.Logger {
@@ -86,14 +121,4 @@ func loggerOrDefault(logger *slog.Logger) *slog.Logger {
 		return slog.Default()
 	}
 	return logger
-}
-
-// logStopped logs the end of Run: info for a shutdown, error with the cause
-// when Run stops early.
-func logStopped(ctx context.Context, logger *slog.Logger, msg string, err error) {
-	if err == nil {
-		logger.LogAttrs(ctx, slog.LevelInfo, msg)
-		return
-	}
-	logger.LogAttrs(ctx, slog.LevelError, msg, sloghelper.Error(err))
 }

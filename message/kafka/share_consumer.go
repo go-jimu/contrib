@@ -161,8 +161,12 @@ func (c *ShareConsumer) Run(ctx context.Context) error {
 	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka share consumer started")
 	err := c.run(ctx)
 	c.flush(ctx)
-	logStopped(ctx, c.log, "kafka share consumer stopped", err)
-	return err
+	if err != nil {
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka share consumer stopped", sloghelper.Error(err))
+		return err
+	}
+	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka share consumer stopped")
+	return nil
 }
 
 func (c *ShareConsumer) run(ctx context.Context) error {

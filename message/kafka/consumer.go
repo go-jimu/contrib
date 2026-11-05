@@ -165,9 +165,13 @@ func (c *Consumer) Run(ctx context.Context) error {
 	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka consumer started")
 	for {
 		shutdown, err := c.pollOnce(ctx)
-		if err != nil || shutdown {
-			logStopped(ctx, c.log, "kafka consumer stopped", err)
+		if err != nil {
+			c.log.LogAttrs(ctx, slog.LevelError, "kafka consumer stopped", sloghelper.Error(err))
 			return err
+		}
+		if shutdown {
+			c.log.LogAttrs(ctx, slog.LevelInfo, "kafka consumer stopped")
+			return nil
 		}
 	}
 }
