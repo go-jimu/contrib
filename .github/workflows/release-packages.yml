@@ -1,6 +1,12 @@
 name: Release Packages
+# Tags each provider module that changed since its previous tag as
+# <package>/<root tag>, pointing at the root tag's commit. CI calls it after
+# auto-release; a root tag pushed by hand triggers it too.
 
 on:
+  push:
+    tags:
+    - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_call:
     inputs:
       root_tag:
@@ -19,17 +25,14 @@ permissions:
 jobs:
   release_packages:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        package: [config/etcd, config/nacos, config/kubernetes, config/apollo, message/kafka, taskqueue/asynq]
     steps:
       - name: Check out code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - env:
-          PACKAGE: ${{ matrix.package }}
-          ROOT_TAG: ${{ inputs.root_tag }}
+          PACKAGES: config/etcd config/nacos config/kubernetes config/apollo message/kafka taskqueue/asynq
+          ROOT_TAG: ${{ inputs.root_tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -40,25 +43,31 @@ jobs:
             echo "Root tag ${ROOT_TAG} does not exist."
             exit 1
           fi
-
           root_target="$(git rev-list -n 1 "${ROOT_TAG}")"
-          package_tag="${PACKAGE}/${ROOT_TAG}"
-          if git rev-parse -q --verify "refs/tags/${package_tag}" >/dev/null; then
-            echo "Package tag ${package_tag} already exists; skipping."
-            exit 0
-          fi
 
-          previous_tag="$(git tag --list "${PACKAGE}/v*" --sort=-v:refname | head -n 1 || true)"
-          if [ -n "${previous_tag}" ] && git diff --quiet "${previous_tag}" "${root_target}" -- "${PACKAGE}"; then
-            echo "No changes in ${PACKAGE} since ${previous_tag}; skipping ${package_tag}."
-            exit 0
-          fi
+          new_tags=()
+          for package in ${PACKAGES}; do
+            package_tag="${package}/${ROOT_TAG}"
+            if git rev-parse -q --verify "refs/tags/${package_tag}" >/dev/null; then
+              echo "Package tag ${package_tag} already exists; skipping."
+              continue
+            fi
 
-          if [ -z "${previous_tag}" ]; then
-            echo "No previous package tag found for ${PACKAGE}; creating ${package_tag}."
-          else
-            echo "Changes detected in ${PACKAGE} since ${previous_tag}; creating ${package_tag}."
-          fi
+            previous_tag="$(git tag --list "${package}/v*" --sort=-v:refname | head -n 1 || true)"
+            if [ -n "${previous_tag}" ] && git diff --quiet "${previous_tag}" "${root_target}" -- "${package}"; then
+              echo "No changes in ${package} since ${previous_tag}; skipping ${package_tag}."
+              continue
+            fi
 
-          git tag "${package_tag}" "${root_target}"
-          git push origin "${package_tag}"
+            if [ -z "${previous_tag}" ]; then
+              echo "No previous package tag found for ${package}; creating ${package_tag}."
+            else
+              echo "Changes detected in ${package} since ${previous_tag}; creating ${package_tag}."
+            fi
+            git tag "${package_tag}" "${root_target}"
+            new_tags+=("${package_tag}")
+          done
+
+          if [ "${#new_tags[@]}" -gt 0 ]; then
+            git push --atomic origin "${new_tags[@]}"
+          fi
