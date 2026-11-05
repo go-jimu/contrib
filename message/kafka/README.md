@@ -4,11 +4,12 @@ Kafka provider for `github.com/go-jimu/components/ddd/message`, built on
 `github.com/twmb/franz-go`.
 
 The contracts live in the package documentation, which `go doc -all
-github.com/go-jimu/contrib/message/kafka` prints: where the import belongs,
-the record mapping, choosing a `FailurePolicy`, the `PayloadResolver`
-requirement, offset commits, the `Consumer.Run` lifecycle and shutdown order,
-and error identities. This README walks through complete programs;
-`example_test.go` runs the policy outcomes and compiles the composition.
+github.com/go-jimu/contrib/message/kafka` prints: choosing between `Consumer`
+and `ShareConsumer`, runtime composition, the record mapping, the handler
+contract, Consumer failures and the `Recoverer`, offsets and rebalances, share
+groups, shutdown, and error identities. This README walks through complete
+programs; `example_test.go` runs the policy outcomes and compiles the
+composition.
 
 ## Install
 
@@ -71,6 +72,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	ordersv1 "example.com/shop/gen/orders/v1" // your generated protobuf package
@@ -99,7 +101,8 @@ func run(ctx context.Context) error {
 		kgo.SeedBrokers("localhost:9092"),
 		kgo.ConsumerGroup("orders-service"),
 		kgo.ConsumeTopics("orders.v1.OrderPaidV1"),
-		kgo.DisableAutoCommit(),
+		kgo.DisableAutoCommit(),    // required: the consumer commits
+		kgo.BlockRebalanceOnPoll(), // required: no rebalance mid-batch
 	)
 	if err != nil {
 		return err
@@ -115,8 +118,10 @@ func run(ctx context.Context) error {
 
 	consumer, err := kafka.NewConsumer(
 		client,
-		kafka.DropAndCommitPolicy(),
+		kafka.RetryPolicy(kafka.RetryConfig{}),
 		kafka.WithPayloadResolver(registry),
+		kafka.WithHandlerTimeout(5*time.Second),
+		kafka.WithMaxPollRecords(10), // 10 × 5s stays below kgo's 60s RebalanceTimeout
 	)
 	if err != nil {
 		return err
@@ -130,32 +135,83 @@ func run(ctx context.Context) error {
 }
 ```
 
-`DropAndCommitPolicy` loses failed messages. See "Choosing a FailurePolicy" in
-the package documentation before picking one.
+`RetryPolicy` retries a handler failure in place, after a backoff, keeping the
+partition's order, and drops the record after 3 attempts. See "Consumer
+failures" in the package documentation before picking one.
 
-## Retry and DLQ
+## Failed messages
 
-`RetryThenDLQPolicy` needs failure topics and a client that also consumes the
-retry topics:
+The consumer publishes no retry or dead-letter records. A handler marks a
+failure a retry cannot fix with `kafka.NonRetryable(err)`. To keep the records
+the policy drops, set a `Recoverer`; the offset is committed only after it
+succeeds:
+
+```go
+consumer, err := kafka.NewConsumer(
+	client,
+	kafka.RetryPolicy(kafka.RetryConfig{MaxAttempts: 5}),
+	kafka.WithPayloadResolver(registry),
+	kafka.WithRecoverer(func(ctx context.Context, failure kafka.Error) error {
+		return failedMessages.Save(ctx, failure.Record, failure.Err) // your table
+	}),
+	kafka.WithErrorObserver(func(ctx context.Context, failure kafka.Error) {
+		if failure.Final || failure.Stage == kafka.StageRecover {
+			alert(ctx, failure)
+		}
+	}),
+)
+```
+
+## Share groups
+
+For messages that need no order, `ShareConsumer` consumes a Kafka share group
+(Kafka 4.2+). Retries and dead letters are the broker's: a released record is
+delivered again, and a rejected one is archived or written to the group's
+dead-letter topic when the broker supports it.
 
 ```go
 client, err := kafka.NewClient(
 	kgo.SeedBrokers("localhost:9092"),
-	kgo.ConsumerGroup("orders-service"),
-	kgo.ConsumeTopics("orders.v1.OrderPaidV1", "orders.v1.OrderPaidV1.retry"),
-	kgo.DisableAutoCommit(),
+	kgo.ShareGroup("notifications-service"),
+	kgo.ConsumeTopics("orders.v1.OrderPaidV1"),
+	kgo.ShareMaxRecords(16), // about the concurrency below
 )
 
-consumer, err := kafka.NewConsumer(
+consumer, err := kafka.NewShareConsumer(
 	client,
-	kafka.RetryThenDLQPolicy(kafka.RetryThenDLQConfig{MaxAttempts: 3}),
+	kafka.ReleaseOrRejectPolicy(),
 	kafka.WithPayloadResolver(registry),
-	kafka.WithDefaultFailureTopics(),
+	kafka.WithConcurrency(16),
+	kafka.WithHandlerTimeout(20*time.Second), // well within the 30s record lock
 )
 ```
 
-Provision `orders.v1.OrderPaidV1.retry` and `orders.v1.OrderPaidV1.dlq` in Kafka, or replace the
-naming with `WithRetryTopicResolver` and `WithDLQTopicResolver`.
+Keep the client's share fetches about as large as the concurrency, for example
+`kgo.ShareMaxRecords(16)`: a record waiting in the client is already locked.
+
+## Logging
+
+Both consumers log through `WithLogger` (default `slog.Default()`): Info for
+start and stop, Warn for failures that heal by themselves (retries, releases,
+Recoverer failures, poll errors, slow batches), Error when a message is lost
+or `Run` stops, and Debug for batch summaries and partition pauses. Hand the
+same logger to the franz-go client with `KgoLogger`:
+
+```go
+client, err := kafka.NewClient(
+	kgo.SeedBrokers("localhost:9092"),
+	// ...
+	kgo.WithLogger(kafka.KgoLogger(logger, kgo.LogLevelInfo)),
+)
+consumer, err := kafka.NewConsumer(client, policy,
+	kafka.WithPayloadResolver(registry),
+	kafka.WithLogger(logger),
+)
+```
+
+To log every handled message at Debug, subscribe
+`message.Chain(handler, message.Logging(logger))`. The messages and attributes
+are listed under "Logging" in the package documentation.
 
 ## Publisher Retry
 
@@ -170,13 +226,12 @@ publisher := kafka.NewPublisher(
 
 ## Deprecated options
 
-`WithRetryPolicy`, `WithDLQDisabled`, and `WithErrorHandler` are deprecated
-and have no effect on failure flow. Use a `FailurePolicy`, explicit failure
-topic options, and `WithErrorObserver`.
+`WithErrorHandler` is deprecated; use `WithErrorObserver`.
 
 ## Integration Tests
 
-Integration tests use Testcontainers and require Docker:
+Integration tests use Testcontainers with the `apache/kafka` image and require
+Docker:
 
 ```sh
 cd message/kafka && go test -tags=integration ./...

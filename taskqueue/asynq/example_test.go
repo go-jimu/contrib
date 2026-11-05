@@ -80,14 +80,18 @@ func ExampleNewRedisClient() {
 // ExampleNewRedisWorker composes a Worker in runtime code. It needs Redis, so
 // it is compiled but not run.
 func ExampleNewRedisWorker() {
+	logger := slog.Default()
 	worker := taskasynq.NewRedisWorker(
 		asynq.RedisClientOpt{Addr: "localhost:6379"},
 		asynq.Config{
 			// List every Definition.Queue this worker processes.
 			Queues: map[string]int{"mailers": 1},
-			// Processor failures after startup surface here, not from Run.
-			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
-				slog.ErrorContext(ctx, "task failed", slog.String("type", task.Type()), slog.Any("error", err))
+			// asynq's own logs: Redis errors, shutdown, lease extensions.
+			Logger: taskasynq.NewLogger(logger),
+			// taskqueue.Logging below logs each failure; ErrorHandler is
+			// left for metrics and alerts.
+			ErrorHandler: asynq.ErrorHandlerFunc(func(context.Context, *asynq.Task, error) {
+				// failedTasks.Inc()
 			}),
 		},
 	)
@@ -102,6 +106,7 @@ func ExampleNewRedisWorker() {
 			_ = info.TaskID() // asynq's task ID; task.ID() is empty here
 			return nil
 		},
+		taskqueue.Logging(logger), // before Recover, so it logs panics too
 		taskqueue.Recover(),
 	)))
 	if err != nil {

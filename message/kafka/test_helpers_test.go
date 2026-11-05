@@ -6,8 +6,6 @@ import (
 
 	"github.com/go-jimu/components/ddd/message"
 	testdata "github.com/go-jimu/components/encoding/testdata"
-	// Keep the integration-test module pinned until broker tests are added.
-	_ "github.com/testcontainers/testcontainers-go/modules/kafka"
 )
 
 func testPayload(t *testing.T) *testdata.TestModel {

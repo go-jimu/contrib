@@ -125,30 +125,3 @@ func isNilProtoMessage(msg proto.Message) bool {
 		return false
 	}
 }
-
-func cloneRecord(record *kgo.Record) *kgo.Record {
-	if record == nil {
-		return nil
-	}
-
-	clone := *record
-	clone.Key = cloneBytes(record.Key)
-	clone.Value = cloneBytes(record.Value)
-	if record.Headers != nil {
-		clone.Headers = make([]kgo.RecordHeader, len(record.Headers))
-		for i, header := range record.Headers {
-			clone.Headers[i] = kgo.RecordHeader{
-				Key:   header.Key,
-				Value: cloneBytes(header.Value),
-			}
-		}
-	}
-	return &clone
-}
-
-func cloneBytes(data []byte) []byte {
-	if data == nil {
-		return nil
-	}
-	return append([]byte(nil), data...)
-}

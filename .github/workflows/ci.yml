@@ -9,8 +9,9 @@ on:
     branches:
     - master
 
+# Tests read the repository only; the release jobs alone push tags.
 permissions:
-  contents: write
+  contents: read
 
 # A new push to a pull request supersedes its running checks. Master runs
 # queue one at a time, so two releases never pick the same tag; a queued run
@@ -24,10 +25,10 @@ jobs:
     runs-on: ${{matrix.os}}
     steps:
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Go 1.x
         id: setup-go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{matrix.go-version}}
           # Caching is done below: setup-go keys its cache on go.sum alone, so
@@ -36,7 +37,7 @@ jobs:
       # Each master run saves a fresh build cache under its commit; every run
       # restores the newest one for its Go version and go.sum files.
       - name: Restore Go build cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cache/go-build
@@ -47,9 +48,12 @@ jobs:
             go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-
       - name: Unittest
         run: make test
+      - name: Each module tidy on its own
+        if: ${{ matrix.go-version == '1.26.x' }}
+        run: make tidy-check
       - name: Save Go build cache
         if: ${{ github.event_name == 'push' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cache/go-build
@@ -57,7 +61,7 @@ jobs:
           key: go-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
       - name: Code Coverage Report
         if: ${{ matrix.go-version == '1.26.x' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: true
           files: coverage.txt
@@ -74,12 +78,14 @@ jobs:
   auto_release:
     needs: unittest
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Merge pull request ') }}
     outputs:
       new_tag: ${{ steps.autotag.outputs.new_tag }}
     steps:
     - name: Check out the merge commit
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
@@ -91,15 +97,16 @@ jobs:
         default_bump: patch
     - name: Create GitHub Release
       if: ${{ steps.autotag.outputs.new_tag != '' }}
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ steps.autotag.outputs.new_tag }}
         name: ${{ steps.autotag.outputs.new_tag }}
         generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.GITHUB_TOKEN }}
   auto_release_sub_packages:
     needs: auto_release
+    permissions:
+      contents: write
     if: ${{ needs.auto_release.outputs.new_tag != '' }}
     uses: ./.github/workflows/release-packages.yml
     with:

@@ -3,6 +3,7 @@ package kafka
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	testdata "github.com/go-jimu/components/encoding/testdata"
@@ -51,8 +52,8 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		WithKindResolver(nil),
 		WithPayloadResolver(nil),
 		WithErrorObserver(nil),
-		WithRetryTopicResolver(nil),
-		WithDLQTopicResolver(nil),
+		WithRecoverer(nil),
+		WithRetryBackoff(nil),
 	} {
 		opt(&cfg)
 	}
@@ -91,14 +92,14 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 		t.Fatal("nil error observer option overwrote default observer")
 	}
 
-	if cfg.retryTopicResolver != nil {
-		t.Fatal("retry topic resolver default = non-nil, want nil")
+	if cfg.recoverer != nil {
+		t.Fatal("nil recoverer option set a recoverer")
 	}
-	if cfg.dlqTopicResolver != nil {
-		t.Fatal("DLQ topic resolver default = non-nil, want nil")
+	if cfg.retryBackoff == nil || cfg.retryBackoff(1) != time.Second {
+		t.Fatal("nil retry backoff option overwrote DefaultRetryBackoff")
 	}
-	if cfg.failureFallback != FailurePublishFallbackStop {
-		t.Fatalf("failure fallback = %v, want %v", cfg.failureFallback, FailurePublishFallbackStop)
+	if cfg.handlerTimeout != 0 {
+		t.Fatalf("handler timeout default = %v, want 0 (disabled)", cfg.handlerTimeout)
 	}
 	if cfg.publishRetry.maxAttempts != 1 {
 		t.Fatalf("publish retry max attempts = %d, want 1", cfg.publishRetry.maxAttempts)
@@ -108,28 +109,6 @@ func TestOptionsNilValuesPreserveDefaults(t *testing.T) {
 	}
 	if cfg.closeClient != defaultCloseClient {
 		t.Fatalf("closeClient = %v, want %v", cfg.closeClient, defaultCloseClient)
-	}
-}
-
-// Intent: retry and DLQ topic naming is opt-in so consumers cannot silently depend on undeclared Kafka topics.
-func TestWithDefaultFailureTopics(t *testing.T) {
-	cfg := defaultConfig()
-	WithDefaultFailureTopics()(&cfg)
-
-	retryTopic, err := cfg.retryTopicResolver(Error{Record: &kgo.Record{Topic: "orders"}})
-	if err != nil {
-		t.Fatalf("retry topic resolver returned error: %v", err)
-	}
-	if retryTopic != "orders.retry" {
-		t.Fatalf("retry topic = %q, want orders.retry", retryTopic)
-	}
-
-	dlqTopic, err := cfg.dlqTopicResolver(Error{Record: &kgo.Record{Topic: "orders"}})
-	if err != nil {
-		t.Fatalf("DLQ topic resolver returned error: %v", err)
-	}
-	if dlqTopic != "orders.dlq" {
-		t.Fatalf("DLQ topic = %q, want orders.dlq", dlqTopic)
 	}
 }
 

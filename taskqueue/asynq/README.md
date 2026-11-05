@@ -107,6 +107,24 @@ func run(ctx context.Context) error {
 `asynq.Config.Queues` must list `reconcile`, or the worker never reads that
 queue.
 
+## Logging
+
+Wrap processors with `taskqueue.Logging` for task outcomes, and hand asynq the
+same logger for its own logs:
+
+```go
+worker := taskasynq.NewRedisWorker(redisOpt, asynq.Config{
+	Queues: map[string]int{"reconcile": 1},
+	Logger: taskasynq.NewLogger(logger), // Redis errors, shutdown
+})
+err := worker.Register(taskqueue.NewProcessor(def.Type,
+	taskqueue.Chain(process, taskqueue.Logging(logger), taskqueue.Recover())))
+```
+
+A failure asynq retries is logged at Warn, and the last attempt, a skipped
+retry, or a panic at Error, so `asynq.Config.ErrorHandler` needs no log of its
+own; use it for metrics. See "Logging" in the package documentation.
+
 ## Periodic Task
 
 Keep business work in a task processor; the scheduler only enqueues the

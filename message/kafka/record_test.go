@@ -59,7 +59,6 @@ func TestMessageToRecordReservedHeadersWin(t *testing.T) {
 		message.WithHeader(cfg.headerNames.MessageID, "msg-forged"),
 		message.WithHeader(cfg.headerNames.MessageKind, "forged.Kind"),
 		message.WithHeader(cfg.headerNames.OccurredAt, "2020-01-01T00:00:00Z"),
-		message.WithHeader(headerRetryAttempt, "99"),
 	)
 	if err != nil {
 		t.Fatalf("message.New returned error: %v", err)
@@ -78,9 +77,6 @@ func TestMessageToRecordReservedHeadersWin(t *testing.T) {
 	}
 	if got := headerValue(record.Headers, cfg.headerNames.OccurredAt); got != msg.OccurredAt().Format(time.RFC3339Nano) {
 		t.Fatalf("occurred at header = %q, want %q", got, msg.OccurredAt().Format(time.RFC3339Nano))
-	}
-	if got := headerValue(record.Headers, headerRetryAttempt); got != "" {
-		t.Fatalf("retry attempt header = %q, want empty", got)
 	}
 }
 
@@ -213,7 +209,6 @@ func TestRecordToMessageReconstructsMessage(t *testing.T) {
 			{Key: cfg.headerNames.MessageKind, Value: []byte("order.payment.v1.OrderPaid")},
 			{Key: cfg.headerNames.OccurredAt, Value: []byte(occurredAt.Format(time.RFC3339Nano))},
 			{Key: "trace_id", Value: []byte("trace-1")},
-			{Key: headerRetryAttempt, Value: []byte("2")},
 		},
 	}
 
@@ -236,9 +231,6 @@ func TestRecordToMessageReconstructsMessage(t *testing.T) {
 	}
 	if got := msg.Headers()["trace_id"]; got != "trace-1" {
 		t.Fatalf("trace header = %q, want trace-1", got)
-	}
-	if got := msg.Headers()[headerRetryAttempt]; got != "" {
-		t.Fatalf("reserved retry header = %q, want empty", got)
 	}
 	if !proto.Equal(msg.Payload(), testPayload(t)) {
 		t.Fatalf("payload = %#v, want %#v", msg.Payload(), testPayload(t))
@@ -342,63 +334,5 @@ func TestRecordToMessageRejectsTypedNilPayloadResolverResult(t *testing.T) {
 	}
 	if msg.Kind() != "" || msg.Payload() != nil {
 		t.Fatalf("message = %#v, want zero", msg)
-	}
-}
-
-// Intent: retry and DLQ flows need cloned records whose mutable byte slices cannot mutate the original Kafka record.
-func TestCloneRecordDeepCopiesRecord(t *testing.T) {
-	original := &kgo.Record{
-		Topic:     "orders",
-		Key:       []byte("order-1"),
-		Value:     []byte("payload"),
-		Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
-		Headers: []kgo.RecordHeader{
-			{Key: "trace_id", Value: []byte("trace-1")},
-		},
-	}
-
-	cloned := cloneRecord(original)
-
-	if cloned == original {
-		t.Fatal("cloneRecord returned the original pointer")
-	}
-	cloned.Key[0] = 'X'
-	cloned.Value[0] = 'X'
-	cloned.Headers[0].Value[0] = 'X'
-
-	if string(original.Key) != "order-1" {
-		t.Fatalf("original key mutated to %q", original.Key)
-	}
-	if string(original.Value) != "payload" {
-		t.Fatalf("original value mutated to %q", original.Value)
-	}
-	if string(original.Headers[0].Value) != "trace-1" {
-		t.Fatalf("original header mutated to %q", original.Headers[0].Value)
-	}
-	if cloneRecord(nil) != nil {
-		t.Fatal("cloneRecord(nil) returned non-nil")
-	}
-}
-
-// Intent: retry attempt parsing should treat absent, malformed, and negative headers as first-attempt records.
-func TestRetryAttemptParsesHeader(t *testing.T) {
-	tests := []struct {
-		name    string
-		headers []kgo.RecordHeader
-		want    int
-	}{
-		{name: "missing", want: 0},
-		{name: "empty", headers: []kgo.RecordHeader{{Key: headerRetryAttempt}}, want: 0},
-		{name: "invalid", headers: []kgo.RecordHeader{{Key: headerRetryAttempt, Value: []byte("nope")}}, want: 0},
-		{name: "negative", headers: []kgo.RecordHeader{{Key: headerRetryAttempt, Value: []byte("-1")}}, want: 0},
-		{name: "valid", headers: []kgo.RecordHeader{{Key: headerRetryAttempt, Value: []byte("3")}}, want: 3},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := retryAttempt(tt.headers); got != tt.want {
-				t.Fatalf("retryAttempt() = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }

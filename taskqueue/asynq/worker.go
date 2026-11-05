@@ -41,8 +41,8 @@ func NewWorker(backend *hibiken.Server) *Worker {
 }
 
 // NewRedisWorker creates an asynq server for conn and cfg and wraps it. List
-// every queue the worker should read in cfg.Queues; set cfg.ErrorHandler to
-// observe processor failures.
+// every queue the worker should read in cfg.Queues, and set cfg.Logger and
+// cfg.ErrorHandler as Logging in the package documentation describes.
 func NewRedisWorker(conn hibiken.RedisConnOpt, cfg hibiken.Config) *Worker {
 	return NewWorker(hibiken.NewServer(conn, cfg))
 }

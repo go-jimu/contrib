@@ -80,8 +80,8 @@ func (p *publisher) Publish(ctx context.Context, msg message.Message) error {
 	return publishErr
 }
 
-// NewClient calls kgo.NewClient. A consuming client needs kgo.ConsumerGroup,
-// kgo.ConsumeTopics, and kgo.DisableAutoCommit.
+// NewClient calls kgo.NewClient. The options a consuming client needs are in
+// Runtime composition in the package documentation.
 func NewClient(opts ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(opts...)
 }

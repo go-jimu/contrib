@@ -6,14 +6,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-jimu/components/ddd/message"
 	testdata "github.com/go-jimu/components/encoding/testdata"
-	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,7 +47,7 @@ func (h integrationHandler) Handle(ctx context.Context, msg message.Message) err
 	return h.handle(ctx, msg)
 }
 
-func startIntegrationRun(t *testing.T, consumer *Consumer) *integrationRun {
+func startIntegrationRun(t *testing.T, consumer message.Runner) *integrationRun {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -75,17 +85,61 @@ func (r *integrationRun) wait(timeout time.Duration) error {
 	return r.err
 }
 
+// integrationKafkaImage is the broker the Consumer integration tests run
+// against. integrationShareKafkaImage runs share groups, which are generally
+// available from Kafka 4.2.
+const (
+	integrationKafkaImage      = "apache/kafka:4.1.2"
+	integrationShareKafkaImage = "apache/kafka:4.3.0"
+)
+
+// startKafka starts a single-node KRaft broker. The apache/kafka image
+// advertises a fixed address, so the test picks a free host port first, has
+// the broker listen on that same port inside the container, and advertises
+// it. The broker must reach itself at the advertised address: its share-group
+// state persister connects to it.
 func startKafka(t *testing.T) []string {
+	t.Helper()
+	return startKafkaImage(t, integrationKafkaImage)
+}
+
+func startKafkaImage(t *testing.T, image string) []string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	container, err := tckafka.Run(
-		ctx,
-		"confluentinc/confluent-local:7.5.0",
-		tckafka.WithClusterID(fmt.Sprintf("jimu-it-%d", time.Now().UnixNano())),
-	)
+	port := freePort(t)
+	containerPort := strconv.Itoa(port) + "/tcp"
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        image,
+			ExposedPorts: []string{containerPort},
+			Env: map[string]string{
+				"KAFKA_NODE_ID":                                          "1",
+				"KAFKA_PROCESS_ROLES":                                    "broker,controller",
+				"KAFKA_LISTENERS":                                        fmt.Sprintf("PLAINTEXT://:%d,CONTROLLER://:9093", port),
+				"KAFKA_ADVERTISED_LISTENERS":                             fmt.Sprintf("PLAINTEXT://127.0.0.1:%d", port),
+				"KAFKA_CONTROLLER_LISTENER_NAMES":                        "CONTROLLER",
+				"KAFKA_LISTENER_SECURITY_PROTOCOL_MAP":                   "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+				"KAFKA_CONTROLLER_QUORUM_VOTERS":                         "1@localhost:9093",
+				"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR":                 "1",
+				"KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR":         "1",
+				"KAFKA_TRANSACTION_STATE_LOG_MIN_ISR":                    "1",
+				"KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR": "1",
+				"KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR":            "1",
+				"KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS":                 "0",
+				"KAFKA_NUM_PARTITIONS":                                   strconv.Itoa(integrationPartitions),
+			},
+			HostConfigModifier: func(hc *container.HostConfig) {
+				hc.PortBindings = network.PortMap{
+					network.MustParsePort(containerPort): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: strconv.Itoa(port)}},
+				}
+			},
+			WaitingFor: wait.ForLog("Kafka Server started").WithStartupTimeout(2 * time.Minute),
+		},
+		Started: true,
+	})
 	if err != nil {
 		t.Fatalf("start kafka container: %v", err)
 	}
@@ -96,12 +150,20 @@ func startKafka(t *testing.T) []string {
 			t.Errorf("terminate kafka container: %v", err)
 		}
 	})
+	return []string{fmt.Sprintf("127.0.0.1:%d", port)}
+}
 
-	brokers, err := container.Brokers(ctx)
+// integrationPartitions is the partition count of auto-created topics.
+const integrationPartitions = 4
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("get kafka brokers: %v", err)
+		t.Fatalf("find free port: %v", err)
 	}
-	return brokers
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 func newIntegrationClient(t *testing.T, brokers []string, group string, topics ...string) *kgo.Client {
@@ -110,11 +172,10 @@ func newIntegrationClient(t *testing.T, brokers []string, group string, topics .
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.AllowAutoTopicCreation(),
-		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	}
 	if group != "" {
-		opts = append(opts, kgo.ConsumerGroup(group))
+		opts = append(opts, kgo.ConsumerGroup(group), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll())
 	}
 	if len(topics) > 0 {
 		opts = append(opts, kgo.ConsumeTopics(topics...))
@@ -198,98 +259,331 @@ func TestIntegrationPublishAndConsumeMessage(t *testing.T) {
 	}
 }
 
-// Intent: a handler failure against a real Kafka broker should publish a retry record with metadata that identifies the original topic and failed stage.
-func TestIntegrationHandlerErrorPublishesRetryRecord(t *testing.T) {
+func uniqueIntegrationName(prefix string) string {
+	return fmt.Sprintf("jimu-it-%s-%d", prefix, time.Now().UnixNano())
+}
+
+func publishN(t *testing.T, publisher message.Publisher, kind message.Kind, ids []string, key func(i int) string) {
+	t.Helper()
+	for i, id := range ids {
+		msg, err := message.New(kind, &testdata.TestModel{Id: int64(i)}, message.WithID(id), message.WithKey(key(i)))
+		if err != nil {
+			t.Fatalf("new message: %v", err)
+		}
+		if err := publisher.Publish(context.Background(), msg); err != nil {
+			t.Fatalf("publish %s: %v", id, err)
+		}
+	}
+}
+
+// Intent (I1): a member joining mid-stream triggers a rebalance while records
+// are being handled, some of them retried in place (paused and rewound);
+// neither Run fails (no commit for a revoked partition), every message is
+// handled at least once, and the committed offsets cover them all: a fresh
+// member of the group gets nothing.
+func TestIntegrationRebalanceDuringHandling(t *testing.T) {
 	brokers := startKafka(t)
-	sourceTopic := uniqueIntegrationName("orders-source")
-	retryTopic := sourceTopic + ".retry"
-	sourceGroup := uniqueIntegrationName("orders-source-group")
-	retryGroup := uniqueIntegrationName("orders-retry-group")
-	sourceClient := newIntegrationClient(t, brokers, sourceGroup, sourceTopic)
-	retryClient := newIntegrationClient(t, brokers, retryGroup, retryTopic)
-	consumer, err := NewConsumer(
-		sourceClient,
-		RetryThenDLQPolicy(RetryThenDLQConfig{}),
+	topic := uniqueIntegrationName("rebalance")
+	group := uniqueIntegrationName("rebalance-group")
+	kind := message.Kind(topic)
+
+	const total = 80
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	failedOnce := map[string]bool{}
+	handledBy := map[string]int{}
+	newMember := func(name string) (*Consumer, *observed) {
+		client := newIntegrationClient(t, brokers, group, topic)
+		obs := &observed{}
+		consumer, err := NewConsumer(client, RetryPolicy(RetryConfig{}),
+			WithPayloadResolverFunc(integrationPayloadResolver),
+			WithErrorObserver(obs.observe),
+			// Small batches, so the rebalance is not held until member a
+			// has handled everything.
+			WithMaxPollRecords(8),
+			WithRetryBackoff(func(int) time.Duration { return 200 * time.Millisecond }),
+		)
+		if err != nil {
+			t.Fatalf("new consumer %s: %v", name, err)
+		}
+		if err := consumer.Subscribe(integrationHandler{
+			kinds: []message.Kind{kind},
+			handle: func(ctx context.Context, msg message.Message) error {
+				select {
+				case <-time.After(150 * time.Millisecond):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				// Every tenth message fails once, so partitions are paused
+				// and rewound while the group rebalances.
+				if strings.HasSuffix(msg.ID(), "0") && !failedOnce[msg.ID()] {
+					failedOnce[msg.ID()] = true
+					return errors.New("transient failure")
+				}
+				seen[msg.ID()] = true
+				handledBy[name]++
+				return nil
+			},
+		}); err != nil {
+			t.Fatalf("subscribe %s: %v", name, err)
+		}
+		return consumer, obs
+	}
+	count := func() (int, map[string]int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen), maps.Clone(handledBy)
+	}
+	waitFor := func(cond func() bool, timeout time.Duration, what string) {
+		t.Helper()
+		deadline := time.Now().Add(timeout)
+		for !cond() {
+			if time.Now().After(deadline) {
+				n, by := count()
+				t.Fatalf("timed out waiting for %s: %d/%d handled, by member %v", what, n, total, by)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	ids := make([]string, total)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("m-%03d", i)
+	}
+	producer := newIntegrationClient(t, brokers, "")
+	publishN(t, NewPublisher(producer), kind, ids, func(i int) string { return fmt.Sprintf("key-%d", i) })
+
+	consumerA, obsA := newMember("a")
+	runA := startIntegrationRun(t, consumerA)
+	waitFor(func() bool { n, _ := count(); return n >= 5 }, 60*time.Second, "member a to start handling")
+
+	consumerB, obsB := newMember("b")
+	runB := startIntegrationRun(t, consumerB)
+	waitFor(func() bool { n, _ := count(); return n == total }, 120*time.Second, "all messages")
+
+	errA, errB := runA.stopAndWait(30*time.Second), runB.stopAndWait(30*time.Second)
+	if errA != nil || errB != nil {
+		t.Fatalf("Run errors: a = %v, b = %v; want nil", errA, errB)
+	}
+	for name, obs := range map[string]*observed{"a": obsA, "b": obsB} {
+		if commits := obs.stage(StageCommit); len(commits) != 0 {
+			t.Fatalf("member %s commit failures: %v", name, commits[0].Err)
+		}
+	}
+	if _, by := count(); by["b"] == 0 {
+		t.Fatalf("member b handled nothing (%v); the rebalance did not happen mid-stream", by)
+	}
+	if len(failedOnce) != total/10 {
+		t.Fatalf("retried %d messages, want %d", len(failedOnce), total/10)
+	}
+
+	// Every offset must be committed: a fresh member resumes past them all.
+	fresh := newIntegrationClient(t, brokers, group, topic)
+	pollCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for pollCtx.Err() == nil {
+		fetches := fresh.PollRecords(pollCtx, 100)
+		if n := len(fetches.Records()); n > 0 {
+			t.Fatalf("fresh member got %d records (first %s@%d); offsets were not committed past them",
+				n, fetches.Records()[0].Topic, fetches.Records()[0].Offset)
+		}
+		fresh.AllowRebalance()
+	}
+}
+
+// Intent (I2): a retried record is handled again in place after the backoff,
+// before the next record of its partition, so the partition keeps its order.
+func TestIntegrationRetryInPlaceKeepsOrderAndBackoff(t *testing.T) {
+	brokers := startKafka(t)
+	topic := uniqueIntegrationName("retry")
+	group := uniqueIntegrationName("retry-group")
+	kind := message.Kind(topic)
+	const backoff = 500 * time.Millisecond
+
+	client := newIntegrationClient(t, brokers, group, topic)
+	consumer, err := NewConsumer(client, RetryPolicy(RetryConfig{}),
 		WithPayloadResolverFunc(integrationPayloadResolver),
-		WithDefaultFailureTopics(),
+		WithRetryBackoff(func(int) time.Duration { return backoff }),
 	)
 	if err != nil {
 		t.Fatalf("new consumer: %v", err)
 	}
-	publisher := NewPublisher(sourceClient)
-
-	handlerErr := errors.New("handler failed")
+	type call struct {
+		id string
+		at time.Time
+	}
+	calls := make(chan call, 10)
+	failedOnce := false
 	if err := consumer.Subscribe(integrationHandler{
-		kinds: []message.Kind{message.Kind(sourceTopic)},
-		handle: func(context.Context, message.Message) error {
-			return handlerErr
+		kinds: []message.Kind{kind},
+		handle: func(_ context.Context, msg message.Message) error {
+			calls <- call{id: msg.ID(), at: time.Now()}
+			if msg.ID() == "a" && !failedOnce {
+				failedOnce = true
+				return errors.New("database unavailable")
+			}
+			return nil
 		},
 	}); err != nil {
-		t.Fatalf("subscribe handler: %v", err)
+		t.Fatalf("subscribe: %v", err)
 	}
 
+	// Same key, so the same partition, in order a then b.
+	publishN(t, NewPublisher(client), kind, []string{"a", "b"}, func(int) string { return "order-1" })
 	run := startIntegrationRun(t, consumer)
 
-	msg, err := message.New(
-		message.Kind(sourceTopic),
-		&testdata.TestModel{Id: 7, Name: "paid"},
-		message.WithKey("order-7"),
-		message.WithHeader("trace_id", "trace-1"),
+	var got []call
+	for len(got) < 3 {
+		select {
+		case c := <-calls:
+			got = append(got, c)
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out; handled %v", got)
+		}
+	}
+	if err := run.stopAndWait(30 * time.Second); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	ids := []string{got[0].id, got[1].id, got[2].id}
+	if want := []string{"a", "a", "b"}; !slices.Equal(ids, want) {
+		t.Fatalf("handling order = %v, want %v", ids, want)
+	}
+	if gap := got[1].at.Sub(got[0].at); gap < backoff {
+		t.Fatalf("retry came %v after the failure, want at least %v", gap, backoff)
+	}
+}
+
+// setShareGroupConfig sets a share-group config with IncrementalAlterConfigs
+// on resource type GROUP (32).
+func setShareGroupConfig(t *testing.T, client *kgo.Client, group, name, value string) {
+	t.Helper()
+	req := kmsg.NewPtrIncrementalAlterConfigsRequest()
+	resource := kmsg.NewIncrementalAlterConfigsRequestResource()
+	resource.ResourceType = kmsg.ConfigResourceType(32)
+	resource.ResourceName = group
+	config := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
+	config.Name = name
+	config.Op = kmsg.IncrementalAlterConfigOpSet
+	config.Value = &value
+	resource.Configs = append(resource.Configs, config)
+	req.Resources = append(req.Resources, resource)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := req.RequestWith(ctx, client)
+	if err != nil {
+		t.Fatalf("alter share group config: %v", err)
+	}
+	for _, r := range resp.Resources {
+		if err := kerrFor(r.ErrorCode); err != nil {
+			t.Fatalf("alter share group config %s=%s: %v", name, value, err)
+		}
+	}
+}
+
+func kerrFor(code int16) error {
+	if code == 0 {
+		return nil
+	}
+	return fmt.Errorf("kafka error code %d", code)
+}
+
+// Intent (B integration): against a real share group, a released record is
+// delivered again with its delivery count incremented, and a rejected record
+// is not delivered again.
+func TestIntegrationShareConsumerReleaseAndReject(t *testing.T) {
+	brokers := startKafkaImage(t, integrationShareKafkaImage)
+	topic := uniqueIntegrationName("share")
+	group := uniqueIntegrationName("share-group")
+	kind := message.Kind(topic)
+
+	admin := newIntegrationClient(t, brokers, "")
+	setShareGroupConfig(t, admin, group, "share.auto.offset.reset", "earliest")
+	publishN(t, NewPublisher(admin), kind, []string{"retry", "reject"}, func(i int) string { return fmt.Sprintf("key-%d", i) })
+
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ShareGroup(group),
+		kgo.ConsumeTopics(topic),
 	)
 	if err != nil {
-		t.Fatalf("new message: %v", err)
+		t.Fatalf("new share client: %v", err)
 	}
-	if err := publisher.Publish(context.Background(), msg); err != nil {
-		t.Fatalf("publish source message: %v", err)
-	}
+	t.Cleanup(client.Close)
 
-	record := pollOneRecord(t, retryClient, 30*time.Second)
-	if record.Topic != retryTopic {
-		t.Fatalf("retry topic = %q, want %q", record.Topic, retryTopic)
+	obs := &observed{}
+	consumer, err := NewShareConsumer(client, ReleaseOrRejectPolicy(),
+		WithPayloadResolverFunc(integrationPayloadResolver),
+		WithErrorObserver(obs.observe),
+	)
+	if err != nil {
+		t.Fatalf("new share consumer: %v", err)
 	}
-	if string(record.Key) != "order-7" {
-		t.Fatalf("retry key = %q, want order-7", record.Key)
-	}
-	if got := headerValue(record.Headers, headerRetryAttempt); got != "1" {
-		t.Fatalf("retry attempt header = %q, want 1", got)
-	}
-	if got := headerValue(record.Headers, headerOriginalTopic); got != sourceTopic {
-		t.Fatalf("original topic header = %q, want %q", got, sourceTopic)
-	}
-	if got := headerValue(record.Headers, headerFailedStage); got != string(StageHandle) {
-		t.Fatalf("failed stage header = %q, want %q", got, StageHandle)
-	}
-
-	if err := run.stopAndWait(30 * time.Second); err != nil {
-		t.Fatalf("Run error = %v, want nil on ctx shutdown", err)
-	}
-}
-
-func pollOneRecord(t *testing.T, client *kgo.Client, timeout time.Duration) *kgo.Record {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	var lastErr error
-
-	for {
-		fetches := client.PollFetches(ctx)
-		if ctx.Err() != nil {
-			t.Fatalf("timed out waiting for kafka record: %v; last fetch error: %v", ctx.Err(), lastErr)
-		}
-		for _, fetchErr := range fetches.Errors() {
-			if errors.Is(fetchErr.Err, context.Canceled) || errors.Is(fetchErr.Err, context.DeadlineExceeded) {
-				t.Fatalf("poll retry record: %v; last fetch error: %v", fetchErr.Err, lastErr)
+	var mu sync.Mutex
+	calls := map[string]int{}
+	retried := make(chan struct{})
+	if err := consumer.Subscribe(integrationHandler{
+		kinds: []message.Kind{kind},
+		handle: func(_ context.Context, msg message.Message) error {
+			mu.Lock()
+			calls[msg.ID()]++
+			n := calls[msg.ID()]
+			mu.Unlock()
+			switch {
+			case msg.ID() == "reject":
+				return NonRetryable(errors.New("bad input"))
+			case n <= 2:
+				return errors.New("database unavailable")
+			default:
+				close(retried)
+				return nil
 			}
-			lastErr = fetchErr.Err
-			t.Logf("poll retry record fetch error: %v", fetchErr.Err)
-		}
-		for iter := fetches.RecordIter(); !iter.Done(); {
-			return iter.Next()
+		},
+	}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	run := startIntegrationRun(t, consumer)
+
+	select {
+	case <-retried:
+	case <-time.After(60 * time.Second):
+		mu.Lock()
+		defer mu.Unlock()
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		t.Fatalf("released record was not delivered again; calls %v; observed %+v", calls, obs.errors)
+	}
+	// Give the broker a chance to wrongly redeliver the rejected record.
+	time.Sleep(3 * time.Second)
+	if err := run.stopAndWait(30 * time.Second); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls["retry"] != 3 || calls["reject"] != 1 {
+		t.Fatalf("handler calls = %v, want retry 3, reject 1", calls)
+	}
+	var retryAttempts []int
+	var reject []Error
+	for _, f := range obs.stage(StageHandle) {
+		switch f.Message.ID() {
+		case "retry":
+			if f.Final {
+				t.Fatalf("retry failure at attempt %d is final, want not final below the delivery limit", f.Attempt)
+			}
+			retryAttempts = append(retryAttempts, f.Attempt)
+		case "reject":
+			reject = append(reject, f)
 		}
 	}
-}
-
-func uniqueIntegrationName(prefix string) string {
-	return fmt.Sprintf("jimu-it-%s-%d", prefix, time.Now().UnixNano())
+	if !slices.Equal(retryAttempts, []int{1, 2}) {
+		t.Fatalf("retry attempts = %v, want the delivery counts 1 then 2", retryAttempts)
+	}
+	if len(reject) != 1 || !reject[0].Final || reject[0].Attempt != 1 {
+		t.Fatalf("reject failures = %+v, want one final first delivery", reject)
+	}
 }

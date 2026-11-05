@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/go-jimu/components/ddd/message"
@@ -14,7 +15,7 @@ import (
 type TopicResolver func(message.Message) (string, error)
 
 // KindResolver returns the message Kind of a consumed record. The default
-// reads the jimu-message-kind header. An error or "" fails the record at
+// reads the MessageKind header. An error or "" fails the record at
 // StageDecode.
 type KindResolver func(*kgo.Record) (message.Kind, error)
 
@@ -26,41 +27,32 @@ type PayloadResolver = message.PayloadResolver
 // message-level failure flow.
 type ErrorHandler func(context.Context, Error) error
 
-// ErrorObserver observes provider failures without controlling consumer flow,
-// for logging and metrics. It runs on the Run goroutine for every failure,
-// including failures the policy then drops, so keep it fast. A message-level
-// failure after Run's ctx ended is left for redelivery and not observed.
+// ErrorObserver sees every consumer failure, for logging, alerting, and
+// metrics; the policies alone decide what happens to the record. It sees
+// failures the policy then retries too: Error.Final marks the last one. See
+// the concurrency contract in Handlers, and Shutdown, in the package
+// documentation.
 type ErrorObserver func(context.Context, Error)
 
-// FailureTopicResolver resolves the retry or DLQ topic for a failed source record.
-type FailureTopicResolver func(Error) (string, error)
+// Recoverer takes each record the Consumer's FailurePolicy drops, before its
+// offset is committed; the Error carries the source Record. Return nil to
+// settle the record; an error keeps it and calls the Recoverer again after the
+// backoff. See Recoverer in the package documentation.
+type Recoverer func(context.Context, Error) error
 
-// Deprecated: use RetryThenDLQPolicy with NewConsumer.
-type RetryPolicy struct {
-	MaxAttempts int
-	Retryable   func(Error) bool
-}
-
-// FailurePublishFallback chooses what happens when a retry or DLQ record
-// cannot be resolved or published.
-type FailurePublishFallback int
-
-const (
-	// FailurePublishFallbackStop returns the publish failure from Run and leaves the source offset uncommitted.
-	FailurePublishFallbackStop FailurePublishFallback = iota
-	// FailurePublishFallbackDrop commits the source offset when retry or DLQ publish fails.
-	FailurePublishFallbackDrop
-)
+// RetryBackoff returns the delay before attempt+1, after attempt failed
+// attempts at a record (attempt starts at 1).
+type RetryBackoff func(attempt int) time.Duration
 
 // PublishBackoff returns the delay before the next publish retry attempt.
 type PublishBackoff func(attempt int) time.Duration
 
-// Option configures NewPublisher and NewConsumer. Each option notes which of
-// the two it affects; the other ignores it.
+// Option configures NewPublisher, NewConsumer, and NewShareConsumer. Each
+// option names what it affects; the others ignore it.
 type Option func(*config)
 
 // HeaderNames are the reserved record headers that carry message metadata.
-// Publisher and consumer must use the same names.
+// Configure the publisher and the consumers with the same names.
 type HeaderNames struct {
 	MessageID   string
 	MessageKind string
@@ -74,9 +66,16 @@ type config struct {
 	defaultKindResolver bool
 	payloadResolver     PayloadResolver
 	errorObserver       ErrorObserver
-	retryTopicResolver  FailureTopicResolver
-	dlqTopicResolver    FailureTopicResolver
-	failureFallback     FailurePublishFallback
+	logger              *slog.Logger
+	recoverer           Recoverer
+	retryBackoff        RetryBackoff
+	handlerTimeout      time.Duration
+	commitTimeout       time.Duration
+	maxPollRecords      int
+	concurrency         int
+	maxPollRecordsSet   bool
+	deliveryLimit       int
+	afterFunc           func(time.Duration, func())
 	publishRetry        publishRetryConfig
 	closeClient         bool
 	headerNames         HeaderNames
@@ -94,7 +93,11 @@ func defaultConfig() config {
 		topicResolver:       defaultTopicResolver,
 		kindResolver:        defaultKindResolver(defaultHeaderNames()),
 		defaultKindResolver: true,
-		failureFallback:     FailurePublishFallbackStop,
+		retryBackoff:        DefaultRetryBackoff,
+		commitTimeout:       10 * time.Second,
+		maxPollRecords:      DefaultMaxPollRecords,
+		deliveryLimit:       DefaultDeliveryLimit,
+		afterFunc:           func(d time.Duration, f func()) { time.AfterFunc(d, f) },
 		publishRetry:        publishRetryConfig{maxAttempts: 1, sleep: sleepContext},
 		headerNames:         defaultHeaderNames(),
 	}
@@ -132,45 +135,6 @@ func defaultKindResolver(headers HeaderNames) KindResolver {
 	}
 }
 
-// Deprecated: use RetryThenDLQPolicy with NewConsumer.
-func defaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{
-		MaxAttempts: 3,
-		Retryable: func(failure Error) bool {
-			return failure.Stage == StageHandle
-		},
-	}
-}
-
-func defaultRetryTopicResolver(failure Error) (string, error) {
-	topic, err := sourceTopic(failure)
-	if err != nil {
-		return "", err
-	}
-	return topic + ".retry", nil
-}
-
-func defaultDLQTopicResolver(failure Error) (string, error) {
-	topic, err := sourceTopic(failure)
-	if err != nil {
-		return "", err
-	}
-	return topic + ".dlq", nil
-}
-
-func sourceTopic(failure Error) (string, error) {
-	if failure.Record == nil {
-		return "", ErrNilRecord
-	}
-	if topic := headerValue(failure.Record.Headers, headerOriginalTopic); topic != "" {
-		return topic, nil
-	}
-	if failure.Record.Topic == "" {
-		return "", ErrNoTopic
-	}
-	return failure.Record.Topic, nil
-}
-
 func sleepContext(ctx context.Context, delay time.Duration) error {
 	if delay <= 0 {
 		return nil
@@ -186,7 +150,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 // WithCodec replaces the protobuf codec for payloads, for the publisher and
-// the consumer. A nil codec is ignored.
+// the consumers. A nil codec is ignored.
 func WithCodec(codec Codec) Option {
 	return func(cfg *config) {
 		if codec != nil {
@@ -205,7 +169,7 @@ func WithTopicResolver(resolver TopicResolver) Option {
 	}
 }
 
-// WithKindResolver sets how the consumer derives a record's Kind, for records
+// WithKindResolver sets how the consumers derive a record's Kind, for records
 // written by producers other than this package. A nil resolver is ignored.
 func WithKindResolver(resolver KindResolver) Option {
 	return func(cfg *config) {
@@ -216,9 +180,9 @@ func WithKindResolver(resolver KindResolver) Option {
 	}
 }
 
-// WithPayloadResolver sets the consumer's payload resolver, usually a
-// *message.PayloadRegistry. NewConsumer requires it and returns
-// ErrNoPayloadResolver without it. A nil resolver is ignored.
+// WithPayloadResolver sets the consumers' payload resolver, usually a
+// *message.PayloadRegistry. Both consumer constructors require it. A nil
+// resolver is ignored.
 func WithPayloadResolver(resolver PayloadResolver) Option {
 	return func(cfg *config) {
 		if resolver != nil {
@@ -235,7 +199,7 @@ func WithPayloadResolverFunc(resolver func(message.Kind) (proto.Message, error))
 	return WithPayloadResolver(message.PayloadResolverFunc(resolver))
 }
 
-// WithErrorObserver sets the consumer's ErrorObserver. A nil observer is
+// WithErrorObserver sets the consumers' ErrorObserver. A nil observer is
 // ignored.
 func WithErrorObserver(observer ErrorObserver) Option {
 	return func(cfg *config) {
@@ -257,59 +221,10 @@ func WithErrorHandler(handler ErrorHandler) Option {
 	}
 }
 
-// Deprecated: pass RetryThenDLQPolicy to NewConsumer.
-func WithRetryPolicy(policy RetryPolicy) Option {
-	return func(*config) {}
-}
-
-// Deprecated: choose DropAndCommitPolicy or a custom FailurePolicy.
-func WithDLQDisabled() Option {
-	return func(*config) {}
-}
-
-// WithDefaultFailureTopics makes the consumer publish retry records to
-// <source-topic>.retry and DLQ records to <source-topic>.dlq, where the source
-// topic is the original topic of a record consumed from a retry topic.
-func WithDefaultFailureTopics() Option {
-	return func(cfg *config) {
-		cfg.retryTopicResolver = defaultRetryTopicResolver
-		cfg.dlqTopicResolver = defaultDLQTopicResolver
-	}
-}
-
-// WithRetryTopicResolver sets the consumer's retry topic. A nil resolver is
-// ignored.
-func WithRetryTopicResolver(resolver FailureTopicResolver) Option {
-	return func(cfg *config) {
-		if resolver != nil {
-			cfg.retryTopicResolver = resolver
-		}
-	}
-}
-
-// WithDLQTopicResolver sets the consumer's DLQ topic. A nil resolver is
-// ignored.
-func WithDLQTopicResolver(resolver FailureTopicResolver) Option {
-	return func(cfg *config) {
-		if resolver != nil {
-			cfg.dlqTopicResolver = resolver
-		}
-	}
-}
-
-// WithFailurePublishFallback sets what the consumer does when a retry or DLQ
-// record cannot be resolved or published. The default,
-// FailurePublishFallbackStop, stops Run without committing.
-func WithFailurePublishFallback(fallback FailurePublishFallback) Option {
-	return func(cfg *config) {
-		cfg.failureFallback = fallback
-	}
-}
-
 // WithPublishRetry makes Publish try a failed produce up to maxAttempts times
 // in total, waiting backoff(attempt) between attempts or until ctx ends. A
 // maxAttempts of 1 or less keeps one attempt; a nil backoff retries at once.
-// It affects the publisher only, not retry or DLQ records.
+// It affects the publisher only.
 func WithPublishRetry(maxAttempts int, backoff PublishBackoff) Option {
 	return func(cfg *config) {
 		if maxAttempts > 1 {
@@ -319,7 +234,7 @@ func WithPublishRetry(maxAttempts int, backoff PublishBackoff) Option {
 	}
 }
 
-// WithCloseClient makes Consumer.Close close the franz-go client.
+// WithCloseClient makes the consumers' Close close the franz-go client.
 func WithCloseClient(closeClient bool) Option {
 	return func(cfg *config) {
 		cfg.closeClient = closeClient
@@ -336,6 +251,99 @@ func WithHeaderNames(headers HeaderNames) Option {
 		cfg.headerNames = headers
 		if cfg.defaultKindResolver {
 			cfg.kindResolver = defaultKindResolver(headers)
+		}
+	}
+}
+
+// DefaultRetryBackoff waits 1s after the first failed attempt and doubles the
+// delay for each further one, up to 1 minute.
+func DefaultRetryBackoff(attempt int) time.Duration {
+	const maxDelay = time.Minute
+	if attempt <= 1 {
+		return time.Second
+	}
+	if attempt > 7 {
+		return maxDelay
+	}
+	return min(time.Second<<(attempt-1), maxDelay)
+}
+
+// WithRetryBackoff sets the Consumer's delay before handling a record again
+// after FailureActionRetry, and before calling a failed Recoverer again. The
+// default is DefaultRetryBackoff. A nil backoff is ignored.
+func WithRetryBackoff(backoff RetryBackoff) Option {
+	return func(cfg *config) {
+		if backoff != nil {
+			cfg.retryBackoff = backoff
+		}
+	}
+}
+
+// WithHandlerTimeout bounds how long the handlers of one record run, for both
+// consumers. At the timeout the handlers' ctx is cancelled and the record
+// fails at StageHandle with an error matching ErrHandlerTimeout. 0 or less,
+// the default, sets no timeout. How to size it against kgo.RebalanceTimeout
+// and the share group's record lock is in Consumer offsets and rebalances,
+// and Share groups, in the package documentation.
+func WithHandlerTimeout(timeout time.Duration) Option {
+	return func(cfg *config) {
+		cfg.handlerTimeout = timeout
+	}
+}
+
+// WithRecoverer sets the Consumer's Recoverer. A nil recoverer is ignored.
+func WithRecoverer(recoverer Recoverer) Option {
+	return func(cfg *config) {
+		if recoverer != nil {
+			cfg.recoverer = recoverer
+		}
+	}
+}
+
+// DefaultMaxPollRecords is the default WithMaxPollRecords limit.
+const DefaultMaxPollRecords = 500
+
+// WithMaxPollRecords limits the records of one batch, for both consumers. 0 or
+// less means no limit. The default is DefaultMaxPollRecords for the Consumer
+// and WithConcurrency for the ShareConsumer. See Consumer offsets and
+// rebalances, and Share groups, in the package documentation.
+func WithMaxPollRecords(n int) Option {
+	return func(cfg *config) {
+		cfg.maxPollRecords = max(n, 0)
+		cfg.maxPollRecordsSet = true
+	}
+}
+
+// WithConcurrency sets how many records the ShareConsumer handles at once. 0 or
+// less, the default, means runtime.GOMAXPROCS(0). The Consumer runs one
+// goroutine per partition instead; see Choosing a consumer in the package
+// documentation.
+func WithConcurrency(n int) Option {
+	return func(cfg *config) {
+		cfg.concurrency = n
+	}
+}
+
+// DefaultDeliveryLimit is Kafka's default share.delivery.count.limit.
+const DefaultDeliveryLimit = 5
+
+// WithDeliveryLimit tells the ShareConsumer the share group's
+// share.delivery.count.limit, so that a release on the last allowed delivery
+// is reported with Error.Final set: the broker archives the record next. The
+// default is DefaultDeliveryLimit; 0 or less never marks a release final.
+func WithDeliveryLimit(n int) Option {
+	return func(cfg *config) {
+		cfg.deliveryLimit = max(n, 0)
+	}
+}
+
+// WithLogger sets the logger of both consumers. The default is slog.Default()
+// at construction; a nil logger keeps it. The levels and attributes the
+// consumers log are in Logging in the package documentation.
+func WithLogger(logger *slog.Logger) Option {
+	return func(cfg *config) {
+		if logger != nil {
+			cfg.logger = logger
 		}
 	}
 }
