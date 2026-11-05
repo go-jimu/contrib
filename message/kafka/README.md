@@ -189,6 +189,29 @@ consumer, err := kafka.NewShareConsumer(
 Keep the client's share fetches about as large as the concurrency, for example
 `kgo.ShareMaxRecords(16)`: a record waiting in the client is already locked.
 
+## Logging
+
+Both consumers log through `WithLogger` (default `slog.Default()`): Info for
+start and stop, Warn for failures that heal by themselves (retries, releases,
+Recoverer failures, poll errors, slow batches), Error when a message is lost
+or `Run` stops, and Debug for batch summaries and partition pauses. Hand the
+same logger to the franz-go client with `KgoLogger`:
+
+```go
+client, err := kafka.NewClient(
+	kgo.SeedBrokers("localhost:9092"),
+	// ...
+	kgo.WithLogger(kafka.KgoLogger(logger, kgo.LogLevelInfo)),
+)
+consumer, err := kafka.NewConsumer(client, policy,
+	kafka.WithPayloadResolver(registry),
+	kafka.WithLogger(logger),
+)
+```
+
+The messages and attributes are listed under "Logging" in the package
+documentation.
+
 ## Publisher Retry
 
 ```go

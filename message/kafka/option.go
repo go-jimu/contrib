@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/go-jimu/components/ddd/message"
@@ -65,6 +66,7 @@ type config struct {
 	defaultKindResolver bool
 	payloadResolver     PayloadResolver
 	errorObserver       ErrorObserver
+	logger              *slog.Logger
 	recoverer           Recoverer
 	retryBackoff        RetryBackoff
 	handlerTimeout      time.Duration
@@ -332,5 +334,16 @@ const DefaultDeliveryLimit = 5
 func WithDeliveryLimit(n int) Option {
 	return func(cfg *config) {
 		cfg.deliveryLimit = max(n, 0)
+	}
+}
+
+// WithLogger sets the logger of both consumers. The default is slog.Default()
+// at construction; a nil logger keeps it. The levels and attributes the
+// consumers log are in Logging in the package documentation.
+func WithLogger(logger *slog.Logger) Option {
+	return func(cfg *config) {
+		if logger != nil {
+			cfg.logger = logger
+		}
 	}
 }

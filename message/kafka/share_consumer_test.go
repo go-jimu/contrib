@@ -21,6 +21,7 @@ type fakeShareClient struct {
 	pollHooks map[int]func()
 	cancel    context.CancelFunc
 	flushCtxs []error
+	flushErr  error
 	closed    bool
 	pollCount int
 	pollMax   []int
@@ -67,7 +68,7 @@ func (f *fakeShareClient) FlushAcks(ctx context.Context) error {
 	defer f.mu.Unlock()
 	f.checkAcked()
 	f.flushCtxs = append(f.flushCtxs, ctx.Err())
-	return nil
+	return f.flushErr
 }
 
 func (f *fakeShareClient) Close() { f.closed = true }

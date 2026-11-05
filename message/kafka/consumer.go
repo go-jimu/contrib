@@ -3,12 +3,14 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-jimu/components/sloghelper"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -34,6 +36,10 @@ type Consumer struct {
 
 	mu    sync.Mutex
 	heads map[topicPartition]*headState
+
+	// rebalanceTimeout is the client's kgo.RebalanceTimeout; a batch that
+	// uses half of it is logged as slow. 0 skips the check.
+	rebalanceTimeout time.Duration
 }
 
 type topicPartition struct {
@@ -70,13 +76,22 @@ func NewConsumer(client *kgo.Client, policy FailurePolicy, opts ...Option) (*Con
 	}
 
 	var consumer pollClient
+	var rebalanceTimeout time.Duration
 	if client != nil {
 		if err := validateGroupClient(client); err != nil {
 			return nil, err
 		}
 		consumer = client
+		group, _ := client.OptValue(kgo.ConsumerGroup).(string)
+		cfg.logger = loggerOrDefault(cfg.logger).With(slog.String("consumer_group", group))
+		rebalanceTimeout, _ = client.OptValue(kgo.RebalanceTimeout).(time.Duration)
 	}
-	return newConsumer(consumer, policy, cfg)
+	c, err := newConsumer(consumer, policy, cfg)
+	if err != nil {
+		return nil, err
+	}
+	c.rebalanceTimeout = rebalanceTimeout
+	return c, nil
 }
 
 func validateGroupClient(client *kgo.Client) error {
@@ -147,9 +162,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
+	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka consumer started")
 	for {
 		shutdown, err := c.pollOnce(ctx)
 		if err != nil || shutdown {
+			logStopped(ctx, c.log, "kafka consumer stopped", err)
 			return err
 		}
 	}
@@ -205,9 +222,12 @@ type partitionResult struct {
 	delay time.Duration
 	// err stops Run.
 	err error
+	// settled counts the records up to and including done.
+	settled int
 }
 
 func (c *Consumer) processBatch(ctx context.Context, batches []partitionBatch) error {
+	start := time.Now()
 	results := make([]partitionResult, len(batches))
 	var stopping atomic.Bool
 	var wg sync.WaitGroup
@@ -218,7 +238,33 @@ func (c *Consumer) processBatch(ctx context.Context, batches []partitionBatch) e
 	}
 	wg.Wait()
 
-	return c.settleBatch(ctx, batches, results)
+	err := c.settleBatch(ctx, batches, results)
+	c.logBatch(ctx, batches, results, time.Since(start))
+	return err
+}
+
+// logBatch leaves a debug summary of a batch, and warns when it used half of
+// the rebalance timeout: the group drops a member that holds a rebalance
+// past it.
+func (c *Consumer) logBatch(ctx context.Context, batches []partitionBatch, results []partitionResult, elapsed time.Duration) {
+	records, settled := 0, 0
+	for i, batch := range batches {
+		records += len(batch.records)
+		settled += results[i].settled
+	}
+	c.log.LogAttrs(ctx, slog.LevelDebug, "kafka batch handled",
+		slog.Int("batch_records", records),
+		slog.Int("batch_partitions", len(batches)),
+		slog.Int("committed_records", settled),
+		millis(elapsed),
+	)
+	if c.rebalanceTimeout > 0 && elapsed > c.rebalanceTimeout/2 {
+		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka batch slow",
+			millis(elapsed),
+			durationMillis("rebalance_timeout_ms", c.rebalanceTimeout),
+			slog.Int("batch_records", records),
+		)
+	}
 }
 
 func (c *Consumer) processPartition(ctx context.Context, batch partitionBatch, stopping *atomic.Bool) partitionResult {
@@ -232,6 +278,7 @@ func (c *Consumer) processPartition(ctx context.Context, batch partitionBatch, s
 		switch outcome.kind {
 		case outcomeDone:
 			result.done = record
+			result.settled++
 			continue
 		case outcomeStop:
 			stopping.Store(true)
@@ -273,9 +320,13 @@ func (c *Consumer) settleBatch(ctx context.Context, batches []partitionBatch, re
 				hasPause = true
 				pause[tp.topic] = append(pause[tp.topic], tp.partition)
 				delay := result.delay
+				c.log.LogAttrs(ctx, slog.LevelDebug, "kafka partition paused",
+					append(recordAttrs(result.next), durationMillis("backoff_ms", delay))...)
 				resumes = append(resumes, func() {
 					c.cfg.afterFunc(delay, func() {
 						c.client.ResumeFetchPartitions(map[string][]int32{tp.topic: {tp.partition}})
+						c.log.LogAttrs(context.Background(), slog.LevelDebug, "kafka partition resumed",
+							slog.String("kafka_topic", tp.topic), slog.Int("kafka_partition", int(tp.partition)))
 					})
 				})
 			}
@@ -317,6 +368,8 @@ func (c *Consumer) commit(ctx context.Context, records []*kgo.Record) error {
 	if err := c.client.CommitRecords(commitCtx, records...); err != nil {
 		wrappedErr := fmt.Errorf("%w: %w", ErrCommitFailed, err)
 		c.observe(ctx, Error{Stage: StageCommit, Record: records[0], Err: wrappedErr})
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka commit failed",
+			slog.Int("batch_partitions", len(records)), sloghelper.Error(wrappedErr))
 		return wrappedErr
 	}
 	return nil
@@ -379,8 +432,12 @@ func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record 
 
 	switch action {
 	case FailureActionRetry:
-		return recordOutcome{kind: outcomeLater, delay: c.backoff(head.attempts)}
+		delay := c.backoff(head.attempts)
+		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message retrying",
+			append(failureAttrs(failure), durationMillis("backoff_ms", delay))...)
+		return recordOutcome{kind: outcomeLater, delay: delay}
 	case FailureActionStop:
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka message stopping consumer", failureAttrs(failure)...)
 		return recordOutcome{kind: outcomeStop, err: fmt.Errorf("%w: %w", ErrStopped, err)}
 	default:
 		return c.recover(ctx, tp, head, failure)
@@ -391,11 +448,13 @@ func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record 
 // only when the Recoverer returns nil.
 func (c *Consumer) recover(ctx context.Context, tp topicPartition, head *headState, failure Error) recordOutcome {
 	if c.cfg.recoverer == nil {
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka message dropped", failureAttrs(failure)...)
 		c.clearHead(tp)
 		return recordOutcome{kind: outcomeDone}
 	}
 	err := c.cfg.recoverer(ctx, failure)
 	if err == nil {
+		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message recovered", failureAttrs(failure)...)
 		c.clearHead(tp)
 		return recordOutcome{kind: outcomeDone}
 	}
@@ -405,14 +464,18 @@ func (c *Consumer) recover(ctx context.Context, tp topicPartition, head *headSta
 		return recordOutcome{kind: outcomeLater}
 	}
 	head.recoverAttempts++
-	c.observe(ctx, Error{
+	recoverFailure := Error{
 		Stage:   StageRecover,
 		Record:  failure.Record,
 		Message: failure.Message,
 		Err:     fmt.Errorf("%w: %w", ErrRecoverFailed, err),
 		Attempt: head.recoverAttempts,
-	})
-	return recordOutcome{kind: outcomeLater, delay: c.backoff(head.recoverAttempts)}
+	}
+	c.observe(ctx, recoverFailure)
+	delay := c.backoff(head.recoverAttempts)
+	c.log.LogAttrs(ctx, slog.LevelWarn, "kafka recoverer failed",
+		append(failureAttrs(recoverFailure), durationMillis("backoff_ms", delay))...)
+	return recordOutcome{kind: outcomeLater, delay: delay}
 }
 
 func (c *Consumer) backoff(attempt int) time.Duration {

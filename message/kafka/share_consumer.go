@@ -3,11 +3,13 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-jimu/components/sloghelper"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -117,6 +119,8 @@ func NewShareConsumer(client *kgo.Client, policy ShareFailurePolicy, opts ...Opt
 			return nil, fmt.Errorf("%w: missing %s", ErrInvalidClient, strings.Join(missing, ", "))
 		}
 		consumer = client
+		group, _ := client.OptValue(kgo.ShareGroup).(string)
+		cfg.logger = loggerOrDefault(cfg.logger).With(slog.String("share_group", group))
 	}
 	return newShareConsumer(consumer, policy, cfg)
 }
@@ -154,8 +158,14 @@ func (c *ShareConsumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
-	defer c.flush(ctx)
+	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka share consumer started")
+	err := c.run(ctx)
+	c.flush(ctx)
+	logStopped(ctx, c.log, "kafka share consumer stopped", err)
+	return err
+}
 
+func (c *ShareConsumer) run(ctx context.Context) error {
 	for {
 		fetches := c.client.PollRecords(ctx, c.batchSize())
 		pollErr := c.pollError(ctx, fetches)
@@ -204,6 +214,7 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 	timeout, expired := c.handlerTimeout(record)
 	if expired {
 		// The broker may already have handed the record to another member.
+		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka record lock expiring, released unhandled", recordAttrs(record)...)
 		return kgo.AckRelease
 	}
 	msg, stage, err := c.dispatch(ctx, record, timeout)
@@ -229,10 +240,17 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 
 	switch action {
 	case ShareActionReject:
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka message rejected", failureAttrs(failure)...)
 		return kgo.AckReject
 	case ShareActionAccept:
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka message failure accepted", failureAttrs(failure)...)
 		return kgo.AckAccept
 	default:
+		if failure.Final {
+			c.log.LogAttrs(ctx, slog.LevelError, "kafka message released on last delivery", failureAttrs(failure)...)
+		} else {
+			c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message released", failureAttrs(failure)...)
+		}
 		return kgo.AckRelease
 	}
 }
@@ -278,6 +296,8 @@ func (c *ShareConsumer) flush(ctx context.Context) {
 	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.commitTimeout)
 	defer cancel()
 	if err := c.client.FlushAcks(flushCtx); err != nil {
-		c.observe(ctx, Error{Stage: StageCommit, Err: fmt.Errorf("%w: flush acks: %w", ErrCommitFailed, err)})
+		wrapped := fmt.Errorf("%w: flush acks: %w", ErrCommitFailed, err)
+		c.observe(ctx, Error{Stage: StageCommit, Err: wrapped})
+		c.log.LogAttrs(ctx, slog.LevelError, "kafka acks flush failed", sloghelper.Error(wrapped))
 	}
 }

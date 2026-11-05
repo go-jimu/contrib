@@ -50,12 +50,14 @@
 //		kgo.ConsumeTopics(topics...),
 //		kgo.DisableAutoCommit(),
 //		kgo.BlockRebalanceOnPoll(),
+//		kgo.WithLogger(kafka.KgoLogger(logger, kgo.LogLevelInfo)),
 //	)
 //	registry := message.NewPayloadRegistry()
 //	consumer, err := kafka.NewConsumer(client, kafka.RetryPolicy(kafka.RetryConfig{}),
 //		kafka.WithPayloadResolver(registry),
 //		kafka.WithHandlerTimeout(5*time.Second),
 //		kafka.WithMaxPollRecords(10), // 10 × 5s stays below kgo's 60s RebalanceTimeout
+//		kafka.WithLogger(logger),
 //		kafka.WithErrorObserver(observe),
 //	)
 //	publisher := kafka.NewPublisher(client)
@@ -197,11 +199,55 @@
 // When Run's ctx ends, the Consumer stops each partition before its next
 // record, commits the settled records, and rewinds the rest; the
 // ShareConsumer releases the records it has not handled and flushes its
-// acknowledgements. Both then return nil, and the ended ctx is not observed. A failure that happens after ctx ended, such as a handler cut
-// short, is left for redelivery without the policy or the ErrorObserver.
+// acknowledgements. Both then return nil, and the ended ctx is not observed.
+// A failure that happens after ctx ended, such as a handler cut short, is
+// left for redelivery without the policy, the ErrorObserver, or a log.
 // Commits and acknowledgement flushes run on a ctx detached from Run's,
 // bounded by a timeout, so shutdown completes them. Run lists the errors that
 // stop it early; treat them as fatal and stop or restart the process.
+//
+// # Logging
+//
+// Both consumers log through WithLogger, slog.Default() by default, with ctx,
+// so a handler of the logger can add attributes from ctx such as a trace ID.
+// Logs and the ErrorObserver are independent: logs explain what happened,
+// while the ErrorObserver feeds metrics and alerts. For the franz-go client's
+// own logs, such as group joins and partition assignments, pass KgoLogger to
+// kgo.WithLogger.
+//
+// Every message is a constant string; filter on it. Attributes:
+//
+//   - kafka_topic, kafka_partition, kafka_offset locate a record.
+//   - message_kind and message_id name the message once it decoded.
+//   - stage, attempt, final, and error describe a failure, as in Error.
+//   - consumer_group or share_group is on every log of a consumer built by
+//     NewConsumer or NewShareConsumer.
+//   - Durations are integer milliseconds: elapsed_ms, backoff_ms,
+//     timeout_ms, rebalance_timeout_ms.
+//
+// Levels follow whether anything was lost:
+//
+//   - Error, a message lost or Run stopping: "kafka message dropped" (no
+//     Recoverer), "kafka message stopping consumer", "kafka commit failed",
+//     "kafka consumer stopped" with an error, "kafka message rejected",
+//     "kafka message released on last delivery", "kafka message failure
+//     accepted", "kafka acks flush failed", and "kafka share consumer
+//     stopped" with an error.
+//   - Warn, a failure that heals by itself or needs a look before it costs:
+//     "kafka message retrying", "kafka message recovered" (dropped, kept by
+//     the Recoverer), "kafka recoverer failed", "kafka message released",
+//     "kafka record lock expiring, released unhandled", "kafka poll error",
+//     "kafka batch slow" (a batch used half of kgo.RebalanceTimeout), "kafka
+//     handler still running after timeout", and "kafka handler still running
+//     at shutdown".
+//   - Info, lifecycle: "kafka consumer started", "kafka consumer stopped",
+//     and the share consumer's pair.
+//   - Debug, the steady state: "kafka batch handled" (batch_records,
+//     batch_partitions, committed_records, elapsed_ms), "kafka partition
+//     paused", and "kafka partition resumed".
+//
+// A handled message is not logged here; log it from a handler or a
+// middleware.
 //
 // # Errors
 //
