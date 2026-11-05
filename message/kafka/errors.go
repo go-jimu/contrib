@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -22,8 +23,8 @@ const (
 	// handler; Err matches message.ErrUnhandledKind. It is a message-level
 	// failure.
 	StageUnhandled Stage = "unhandled"
-	// StageHandle is an error returned by a message.Handler. It is a
-	// message-level failure.
+	// StageHandle is an error returned by a message.Handler, or a handler
+	// panic recovered as a *PanicError. It is a message-level failure.
 	StageHandle Stage = "handle"
 	// StageRetryPublish is a failure to resolve or publish the retry record.
 	StageRetryPublish Stage = "retry_publish"
@@ -79,4 +80,30 @@ var (
 	ErrDLQPublishFailed = errors.New("dlq publish failed")
 	// ErrCommitFailed wraps an offset commit failure. Run returns it.
 	ErrCommitFailed = errors.New("commit failed")
+	// ErrHandlerPanic matches a *PanicError: a handler panicked and the
+	// consumer recovered it as a StageHandle failure.
+	ErrHandlerPanic = errors.New("message handler panicked")
 )
+
+// PanicError is the Error.Err of a handler panic that the consumer recovered.
+// Value is what the handler passed to panic and Stack the goroutine stack at
+// the panic; read them with errors.As, for example to log the stack in an
+// ErrorObserver. It matches ErrHandlerPanic and, when Value is an error, that
+// error too. Error omits the stack, so retry and DLQ headers stay small.
+type PanicError struct {
+	Value any
+	Stack []byte
+}
+
+// Error returns "message handler panicked: " followed by Value.
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("%v: %v", ErrHandlerPanic, e.Value)
+}
+
+// Unwrap returns ErrHandlerPanic and, when Value is an error, Value.
+func (e *PanicError) Unwrap() []error {
+	if err, ok := e.Value.(error); ok {
+		return []error{ErrHandlerPanic, err}
+	}
+	return []error{ErrHandlerPanic}
+}

@@ -89,6 +89,9 @@
 //		return f.Stage == kafka.StageHandle && !errors.Is(f.Err, ErrPermanent)
 //	},
 //
+// The default Retryable retries a recovered panic like a handler error; add
+// !errors.Is(f.Err, kafka.ErrHandlerPanic) to send panics straight to DLQ.
+//
 // WithDefaultFailureTopics names the topics <source-topic>.retry and
 // <source-topic>.dlq, using the original topic for records consumed from a
 // retry topic. Provision them in Kafka. Retry and DLQ records copy the source
@@ -108,10 +111,12 @@
 //
 // Run polls and handles one record at a time on the calling goroutine, in
 // partition order, passing its own ctx to the handlers. The handlers of one
-// record run in subscription order and stop at the first error. A handler
-// panic ends the process; recover inside the handler to turn it into an
-// error. Delivery is at least once, so make handlers idempotent, for example
-// keyed by Message.ID.
+// record run in subscription order and stop at the first error or panic.
+// Run recovers a handler panic as a StageHandle failure whose Err is a
+// *PanicError, matching ErrHandlerPanic, and applies the FailurePolicy to it
+// like a handler error; the ErrorObserver can log PanicError.Stack. Delivery
+// is at least once, so make handlers idempotent, for example keyed by
+// Message.ID.
 //
 // When ctx ends, Run returns nil. A handler that fails because ctx ended goes
 // through the FailurePolicy like any other failure, and the publish and commit

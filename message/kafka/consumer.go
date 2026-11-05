@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/go-jimu/components/ddd/message"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -151,9 +152,9 @@ func (c *Consumer) processRecord(ctx context.Context, record *kgo.Record) error 
 		})
 	}
 
-	if err = c.router.Handle(ctx, msg); err != nil {
+	if err = c.handle(ctx, msg); err != nil {
 		stage := StageHandle
-		if errors.Is(err, message.ErrUnhandledKind) {
+		if !errors.Is(err, ErrHandlerPanic) && errors.Is(err, message.ErrUnhandledKind) {
 			stage = StageUnhandled
 		}
 		return c.handleFailure(ctx, Error{
@@ -165,6 +166,17 @@ func (c *Consumer) processRecord(ctx context.Context, record *kgo.Record) error 
 	}
 
 	return c.commit(ctx, record)
+}
+
+// handle routes msg to its handlers and recovers a handler panic as a
+// *PanicError, so it follows the failure policy instead of ending the process.
+func (c *Consumer) handle(ctx context.Context, msg message.Message) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &PanicError{Value: recovered, Stack: debug.Stack()}
+		}
+	}()
+	return c.router.Handle(ctx, msg)
 }
 
 func (c *Consumer) handleFailure(ctx context.Context, failure Error) error {
