@@ -46,20 +46,28 @@ func (db *DB) Manager() *transaction.Manager {
 //   - an error matching transaction.ErrTransactionDone and ErrSessionEnded
 //     when a repository has ended the transaction's session itself.
 func (db *DB) Session(ctx context.Context) (*xormio.Session, error) {
-	current, err := db.manager.Current(ctx)
-	switch {
-	case err == nil:
-		// The Manager was built with driver, so every Tx it holds is a *tx.
-		session := current.(*tx).session
-		if !session.IsInTx() {
-			return nil, fmt.Errorf("%w: %w", transaction.ErrTransactionDone, ErrSessionEnded)
-		}
-		return session.Context(ctx), nil
-	case errors.Is(err, transaction.ErrNoTransaction):
+	session, err := db.TxSession(ctx)
+	if errors.Is(err, transaction.ErrNoTransaction) {
 		return db.engine.Context(ctx), nil
-	default:
+	}
+	return session, err
+}
+
+// TxSession returns the transaction's session, for a statement that must run
+// inside a transaction, such as an outbox Store's insert. See "Repositories".
+// It returns the errors of Session, and transaction.ErrNoTransaction,
+// unwrapped, when ctx is in no transaction.
+func (db *DB) TxSession(ctx context.Context) (*xormio.Session, error) {
+	current, err := db.manager.Current(ctx)
+	if err != nil {
 		return nil, err
 	}
+	// The Manager was built with driver, so every Tx it holds is a *tx.
+	session := current.(*tx).session
+	if !session.IsInTx() {
+		return nil, fmt.Errorf("%w: %w", transaction.ErrTransactionDone, ErrSessionEnded)
+	}
+	return session.Context(ctx), nil
 }
 
 // IsMySQLConflict reports whether err is a MySQL lock wait timeout (1205) or

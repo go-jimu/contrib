@@ -269,6 +269,31 @@ func TestIntegrationSessionFailsClosed(t *testing.T) {
 	}
 }
 
+func TestIntegrationTxSessionNeedsTransaction(t *testing.T) {
+	db, engine := newDB(t)
+	if _, err := db.TxSession(context.Background()); !errors.Is(err, transaction.ErrNoTransaction) {
+		t.Fatalf("TxSession() outside a transaction error = %v, want %v", err, transaction.ErrNoTransaction)
+	}
+	var kept context.Context
+	if err := db.Manager().Within(context.Background(), func(ctx context.Context) error {
+		kept = ctx
+		session, err := db.TxSession(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = session.Insert(&itemDO{ID: "strict", Value: 1})
+		return err
+	}); err != nil {
+		t.Fatalf("Within() error = %v", err)
+	}
+	if n := count(t, engine, "strict"); n != 1 {
+		t.Fatalf("count = %d, want the committed row", n)
+	}
+	if _, err := db.TxSession(kept); !errors.Is(err, transaction.ErrTransactionDone) {
+		t.Fatalf("TxSession() on a kept ctx error = %v, want %v", err, transaction.ErrTransactionDone)
+	}
+}
+
 // TestIntegrationSessionEndedByRepository covers a repository that ends the
 // transaction's session itself; xorm then autocommits later statements on
 // that session.

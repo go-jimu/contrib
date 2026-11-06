@@ -39,6 +39,11 @@
 // returned nil. Treat it as an unknown outcome: statements run on the ended
 // session may have autocommitted.
 //
+// A statement that must not run outside a transaction, such as an outbox
+// record that must commit with the business data, uses TxSession instead: it
+// returns transaction.ErrNoTransaction where Session would return a pool
+// session.
+//
 // The transaction package's "Repositories" section covers the rest: the
 // errors Session passes through, and WithinOrJoin for a write that must be
 // atomic on its own.
