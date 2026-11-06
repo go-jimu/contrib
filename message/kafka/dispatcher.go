@@ -32,14 +32,28 @@ func (d *dispatcher) Subscribe(handler message.Handler) error {
 	return d.router.Subscribe(handler)
 }
 
-// dispatch decodes record and runs its handlers within timeout. On failure it returns the
-// stage that failed: StageDecode, StageUnhandled, or StageHandle.
-func (d *dispatcher) dispatch(ctx context.Context, record *kgo.Record, timeout time.Duration) (message.Message, Stage, error) {
+// recordContext is the ctx of record's work (see WithRecordContext), derived
+// from ctx, Run's force ctx.
+func (d *dispatcher) recordContext(ctx context.Context, record *kgo.Record) context.Context {
+	if d.cfg.recordContext == nil {
+		return ctx
+	}
+	if derived := d.cfg.recordContext(ctx, record); derived != nil {
+		return derived
+	}
+	return ctx
+}
+
+// dispatch decodes record and runs its handlers within timeout, on a ctx
+// derived from recordCtx; ctx, Run's force ctx, tells a forced stop apart. On
+// failure it returns the stage that failed: StageDecode, StageUnhandled, or
+// StageHandle.
+func (d *dispatcher) dispatch(ctx, recordCtx context.Context, record *kgo.Record, timeout time.Duration) (message.Message, Stage, error) {
 	msg, err := recordToMessage(record, d.cfg)
 	if err != nil {
 		return msg, StageDecode, err
 	}
-	err = d.handle(ctx, record, msg, timeout)
+	err = d.handle(ctx, recordCtx, record, msg, timeout)
 	if err != nil && !errors.Is(err, ErrHandlerPanic) && errors.Is(err, message.ErrUnhandledKind) {
 		return msg, StageUnhandled, err
 	}
@@ -52,17 +66,17 @@ func (d *dispatcher) observe(ctx context.Context, failure Error) {
 	}
 }
 
-// handle routes msg to its handlers, bounded by timeout when it is positive.
-// ctx is Run's force ctx. When ctx ends first, it still waits for the
-// handlers to return, up to the rest of the timeout, so that Run returns
-// after them.
-func (d *dispatcher) handle(ctx context.Context, record *kgo.Record, msg message.Message, timeout time.Duration) error {
+// handle routes msg to its handlers on a ctx derived from recordCtx, bounded
+// by timeout when it is positive. ctx is Run's force ctx. When ctx ends first,
+// it still waits for the handlers to return, up to the rest of the timeout,
+// so that Run returns after them.
+func (d *dispatcher) handle(ctx, recordCtx context.Context, record *kgo.Record, msg message.Message, timeout time.Duration) error {
 	if timeout <= 0 {
-		return d.callHandlers(ctx, msg)
+		return d.callHandlers(recordCtx, msg)
 	}
 
 	start := time.Now()
-	handlerCtx, cancel := context.WithTimeoutCause(ctx, timeout, ErrHandlerTimeout)
+	handlerCtx, cancel := context.WithTimeoutCause(recordCtx, timeout, ErrHandlerTimeout)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -82,7 +96,7 @@ func (d *dispatcher) handle(ctx context.Context, record *kgo.Record, msg message
 		case err := <-done:
 			return err
 		case <-wait.C:
-			d.logStillRunning(ctx, "kafka handler still running at shutdown", record, msg, timeout)
+			d.logStillRunning(recordCtx, "kafka handler still running at shutdown", record, msg, timeout)
 			return ctx.Err()
 		}
 	}
@@ -90,7 +104,7 @@ func (d *dispatcher) handle(ctx context.Context, record *kgo.Record, msg message
 	case err := <-done:
 		return timeoutError(ctx, handlerCtx, timeout, err)
 	default:
-		d.logStillRunning(ctx, "kafka handler still running after timeout", record, msg, timeout)
+		d.logStillRunning(recordCtx, "kafka handler still running after timeout", record, msg, timeout)
 		return fmt.Errorf("%w after %s", ErrHandlerTimeout, timeout)
 	}
 }

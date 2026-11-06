@@ -413,13 +413,16 @@ type recordOutcome struct {
 	err   error
 }
 
+// processRecord handles record and decides its outcome. ctx, Run's force ctx,
+// tells a forced stop apart; the record's work and logs use its record ctx.
 func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record *kgo.Record) recordOutcome {
+	rctx := c.recordContext(ctx, record)
 	head := c.head(tp, record.Offset)
 	if head != nil && head.recoverPending {
-		return c.recover(ctx, tp, head, head.failure)
+		return c.recover(ctx, rctx, tp, head, head.failure)
 	}
 
-	msg, stage, err := c.dispatch(ctx, record, c.cfg.handlerTimeout)
+	msg, stage, err := c.dispatch(ctx, rctx, record, c.cfg.handlerTimeout)
 	if err == nil {
 		if head != nil {
 			c.clearHead(tp)
@@ -446,38 +449,39 @@ func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record 
 		Err:     err,
 		Attempt: head.attempts,
 	}
-	action := c.failurePolicy.Decide(ctx, failure)
+	action := c.failurePolicy.Decide(rctx, failure)
 	if action != FailureActionRetry && action != FailureActionStop {
 		action = FailureActionDrop
 	}
 	failure.Final = action != FailureActionRetry
-	c.observe(ctx, failure)
+	c.observe(rctx, failure)
 
 	switch action {
 	case FailureActionRetry:
 		delay := c.backoff(head.attempts)
-		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message retrying",
+		c.log.LogAttrs(rctx, slog.LevelWarn, "kafka message retrying",
 			append(failureAttrs(failure), durationMillis("backoff_ms", delay))...)
 		return recordOutcome{kind: outcomeLater, delay: delay}
 	case FailureActionStop:
-		c.log.LogAttrs(ctx, slog.LevelError, "kafka message stopping consumer", failureAttrs(failure)...)
+		c.log.LogAttrs(rctx, slog.LevelError, "kafka message stopping consumer", failureAttrs(failure)...)
 		return recordOutcome{kind: outcomeStop, err: fmt.Errorf("%w: %w", ErrStopped, err)}
 	default:
-		return c.recover(ctx, tp, head, failure)
+		return c.recover(ctx, rctx, tp, head, failure)
 	}
 }
 
 // recover hands a dropped record to the Recoverer, if any. The record is done
-// only when the Recoverer returns nil.
-func (c *Consumer) recover(ctx context.Context, tp topicPartition, head *headState, failure Error) recordOutcome {
+// only when the Recoverer returns nil. ctx is Run's force ctx and rctx the
+// record ctx, as in processRecord.
+func (c *Consumer) recover(ctx, rctx context.Context, tp topicPartition, head *headState, failure Error) recordOutcome {
 	if c.cfg.recoverer == nil {
-		c.log.LogAttrs(ctx, slog.LevelError, "kafka message dropped", failureAttrs(failure)...)
+		c.log.LogAttrs(rctx, slog.LevelError, "kafka message dropped", failureAttrs(failure)...)
 		c.clearHead(tp)
 		return recordOutcome{kind: outcomeDone}
 	}
-	err := c.cfg.recoverer(ctx, failure)
+	err := c.cfg.recoverer(rctx, failure)
 	if err == nil {
-		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message recovered", failureAttrs(failure)...)
+		c.log.LogAttrs(rctx, slog.LevelWarn, "kafka message recovered", failureAttrs(failure)...)
 		c.clearHead(tp)
 		return recordOutcome{kind: outcomeDone}
 	}
@@ -494,9 +498,9 @@ func (c *Consumer) recover(ctx context.Context, tp topicPartition, head *headSta
 		Err:     fmt.Errorf("%w: %w", ErrRecoverFailed, err),
 		Attempt: head.recoverAttempts,
 	}
-	c.observe(ctx, recoverFailure)
+	c.observe(rctx, recoverFailure)
 	delay := c.backoff(head.recoverAttempts)
-	c.log.LogAttrs(ctx, slog.LevelWarn, "kafka recoverer failed",
+	c.log.LogAttrs(rctx, slog.LevelWarn, "kafka recoverer failed",
 		append(failureAttrs(recoverFailure), durationMillis("backoff_ms", delay))...)
 	return recordOutcome{kind: outcomeLater, delay: delay}
 }

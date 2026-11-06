@@ -103,6 +103,19 @@
 // forced, Run still waits for running handlers, up to the rest of their
 // timeout.
 //
+// WithRecordContext derives each record's ctx from Run's ctx before its
+// handlers run, and the FailurePolicy, ShareFailurePolicy, Recoverer,
+// ErrorObserver, and logs about the record use it too. Use it to carry what a
+// kgo hook put on record.Context, such as the trace context that
+// github.com/twmb/franz-go/plugin/kotel extracts from the record headers, so
+// a handler continues the producer's trace:
+//
+//	kafka.WithRecordContext(func(ctx context.Context, r *kgo.Record) context.Context {
+//		return trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(r.Context))
+//	})
+//
+// The package itself does not depend on OpenTelemetry.
+//
 // # Consumer failures
 //
 // A decode error (StageDecode), a Kind with no handler (StageUnhandled), and a
