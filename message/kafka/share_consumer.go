@@ -232,14 +232,17 @@ func (c *ShareConsumer) processBatch(stop, ctx context.Context, records []*kgo.R
 	wg.Wait()
 }
 
+// processRecord handles record and decides its ack. ctx, Run's force ctx,
+// tells a forced stop apart; the record's work and logs use its record ctx.
 func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) kgo.AckStatus {
+	rctx := c.recordContext(ctx, record)
 	timeout, expired := c.handlerTimeout(record)
 	if expired {
 		// The broker may already have handed the record to another member.
-		c.log.LogAttrs(ctx, slog.LevelWarn, "kafka record lock expiring, released unhandled", recordAttrs(record)...)
+		c.log.LogAttrs(rctx, slog.LevelWarn, "kafka record lock expiring, released unhandled", recordAttrs(record)...)
 		return kgo.AckRelease
 	}
-	msg, stage, err := c.dispatch(ctx, record, timeout)
+	msg, stage, err := c.dispatch(ctx, rctx, record, timeout)
 	if err == nil {
 		return kgo.AckAccept
 	}
@@ -256,23 +259,23 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 		Err:     err,
 		Attempt: int(c.deliveryCount(record)),
 	}
-	action := c.policy.Decide(ctx, failure)
+	action := c.policy.Decide(rctx, failure)
 	failure.Final = action != ShareActionRelease ||
 		(c.cfg.deliveryLimit > 0 && failure.Attempt >= c.cfg.deliveryLimit)
-	c.observe(ctx, failure)
+	c.observe(rctx, failure)
 
 	switch action {
 	case ShareActionReject:
-		c.log.LogAttrs(ctx, slog.LevelError, "kafka message rejected", failureAttrs(failure)...)
+		c.log.LogAttrs(rctx, slog.LevelError, "kafka message rejected", failureAttrs(failure)...)
 		return kgo.AckReject
 	case ShareActionAccept:
-		c.log.LogAttrs(ctx, slog.LevelError, "kafka message failure accepted", failureAttrs(failure)...)
+		c.log.LogAttrs(rctx, slog.LevelError, "kafka message failure accepted", failureAttrs(failure)...)
 		return kgo.AckAccept
 	default:
 		if failure.Final {
-			c.log.LogAttrs(ctx, slog.LevelError, "kafka message released on last delivery", failureAttrs(failure)...)
+			c.log.LogAttrs(rctx, slog.LevelError, "kafka message released on last delivery", failureAttrs(failure)...)
 		} else {
-			c.log.LogAttrs(ctx, slog.LevelWarn, "kafka message released", failureAttrs(failure)...)
+			c.log.LogAttrs(rctx, slog.LevelWarn, "kafka message released", failureAttrs(failure)...)
 		}
 		return kgo.AckRelease
 	}

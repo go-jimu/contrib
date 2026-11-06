@@ -70,6 +70,7 @@ type config struct {
 	recoverer           Recoverer
 	retryBackoff        RetryBackoff
 	handlerTimeout      time.Duration
+	recordContext       func(context.Context, *kgo.Record) context.Context
 	commitTimeout       time.Duration
 	maxPollRecords      int
 	concurrency         int
@@ -288,6 +289,20 @@ func WithRetryBackoff(backoff RetryBackoff) Option {
 func WithHandlerTimeout(timeout time.Duration) Option {
 	return func(cfg *config) {
 		cfg.handlerTimeout = timeout
+	}
+}
+
+// WithRecordContext sets fn to derive the ctx of each record's work, for both
+// consumers: the handlers' ctx, and the ctx of the FailurePolicy, the
+// ShareFailurePolicy, the Recoverer, the ErrorObserver, and the logs about the
+// record. fn receives Run's ctx and the record. Derive the result from ctx and
+// only add values, such as the trace context a kgo hook put on
+// record.Context, so Shutdown, a forced stop, and WithHandlerTimeout still
+// apply. A nil fn, or a nil result, keeps ctx. See Handlers in the package
+// documentation.
+func WithRecordContext(fn func(ctx context.Context, record *kgo.Record) context.Context) Option {
+	return func(cfg *config) {
+		cfg.recordContext = fn
 	}
 }
 
