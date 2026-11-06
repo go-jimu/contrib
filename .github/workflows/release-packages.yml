@@ -31,10 +31,12 @@ jobs:
         with:
           fetch-depth: 0
       - env:
-          PACKAGES: config/etcd config/nacos config/kubernetes config/apollo message/kafka taskqueue/asynq
           ROOT_TAG: ${{ inputs.root_tag || github.ref_name }}
         run: |
           set -euo pipefail
+
+          # Every provider module: each directory below the root with a go.mod.
+          PACKAGES="$(find . -mindepth 2 -name go.mod -not -path './.git/*' -printf '%h\n' | sed 's|^\./||' | sort)"
 
           git config --global user.name "Github Action"
           git config --global user.email "go-jimu@users.noreply.github.com"
