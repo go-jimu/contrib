@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/transaction/xorm
 go 1.26.0
 
 require (
-	github.com/go-jimu/components v0.12.6-0.20261106150555-d22ea61adcc2
+	github.com/go-jimu/components v0.12.6
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	xorm.io/xorm v1.3.9
