@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/event/outbox/xorm
 go 1.26.0
 
 require (
-	github.com/go-jimu/components v0.12.7
+	github.com/go-jimu/components v0.12.8
 	github.com/go-jimu/contrib/transaction/xorm v0.5.5
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/testcontainers/testcontainers-go v0.42.0

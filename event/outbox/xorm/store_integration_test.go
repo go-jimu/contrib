@@ -16,6 +16,7 @@ import (
 	"github.com/go-jimu/components/ddd/event"
 	"github.com/go-jimu/components/ddd/event/outbox"
 	"github.com/go-jimu/components/ddd/event/outbox/outboxtest"
+	"github.com/go-jimu/components/transaction"
 	outboxxorm "github.com/go-jimu/contrib/event/outbox/xorm"
 	jimuxorm "github.com/go-jimu/contrib/transaction/xorm"
 	_ "github.com/go-sql-driver/mysql"
@@ -122,8 +123,14 @@ func pingUntilReady(engine *xormio.Engine) error {
 
 func TestIntegrationStoreConformance(t *testing.T) {
 	outboxtest.TestStore(t, func(t *testing.T) outboxtest.Harness {
-		store, db, _ := newStore(t)
-		return outboxtest.Harness{Store: store, Transactor: db.Manager()}
+		store, db, engine := newStore(t)
+		// A second DB on the same engine has its own Manager, so its
+		// transactions are foreign to store.
+		other, err := jimuxorm.New(engine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return outboxtest.Harness{Store: store, Transactor: db.Manager(), Foreign: other.Manager()}
 	})
 }
 
@@ -264,5 +271,119 @@ func TestNewRejectsInvalidTable(t *testing.T) {
 	}
 	if _, err := outboxxorm.New(nil); !errors.Is(err, outboxxorm.ErrNilDB) {
 		t.Fatalf("New(nil) error = %v, want ErrNilDB", err)
+	}
+}
+
+// projectOnce writes each order into the projection table and calls
+// MarkDone in one transaction of db, on the ctx Handle received; the first
+// transaction of every order rolls back at commit time.
+type projectOnce struct {
+	db       *jimuxorm.DB
+	mu       sync.Mutex
+	attempts map[string]int
+}
+
+func (*projectOnce) Name() string            { return "projection" }
+func (*projectOnce) Listening() []event.Kind { return []event.Kind{OrderPaid{}.Kind()} }
+
+func (p *projectOnce) Handle(ctx context.Context, e event.Event) error {
+	id := e.(OrderPaid).OrderID
+	p.mu.Lock()
+	p.attempts[id]++
+	first := p.attempts[id] == 1
+	p.mu.Unlock()
+	return p.db.Manager().Within(ctx, func(ctx context.Context) error {
+		session, err := p.db.Session(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := session.Exec("INSERT INTO projection (order_id) VALUES (?)", id); err != nil {
+			return err
+		}
+		if err := outbox.MarkDone(ctx); err != nil {
+			return err
+		}
+		if !first {
+			return nil
+		}
+		// Fail at commit time, after MarkDone advanced the progress in this
+		// transaction: the rollback must undo both.
+		return transaction.BeforeCommit(ctx, func(context.Context) error {
+			return errors.New("deadlock at commit, retry")
+		})
+	})
+}
+
+// TestIntegrationHandlerWritesOnce runs a handler whose writes go to the
+// Store's database: a rolled back attempt leaves neither a row nor progress,
+// and every order ends with exactly one row.
+func TestIntegrationHandlerWritesOnce(t *testing.T) {
+	store, db, engine := newStore(t)
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS projection",
+		"CREATE TABLE projection (order_id VARCHAR(36) NOT NULL)", // no key: a duplicate write would show
+	} {
+		if _, err := engine.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry := outbox.NewRegistry()
+	if err := outbox.Register[OrderPaid](registry); err != nil {
+		t.Fatal(err)
+	}
+	ob, err := outbox.New(store, registry, outbox.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		outbox.WithPollInterval(10*time.Millisecond), outbox.WithBackoff(time.Millisecond, time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &projectOnce{db: db, attempts: map[string]int{}}
+	if err := ob.Subscribe(handler); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ob.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run() error = %v", err)
+		}
+	})
+
+	// Two events in one record: the second's progress commits with its row.
+	err = db.Manager().Within(context.Background(), func(ctx context.Context) error {
+		return ob.DispatchAll(ctx, []event.Event{OrderPaid{OrderID: "o-1"}, OrderPaid{OrderID: "o-2"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		counts, err := store.Counts(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(counts) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("records still open: %+v", counts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var rows []struct {
+		OrderID string `xorm:"'order_id'"`
+		N       int    `xorm:"'n'"`
+	}
+	if err := engine.SQL("SELECT order_id, COUNT(*) AS n FROM projection GROUP BY order_id ORDER BY order_id").Find(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].N != 1 || rows[1].N != 1 {
+		t.Fatalf("projection rows %+v, want o-1 and o-2 once each", rows)
+	}
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if handler.attempts["o-1"] != 2 || handler.attempts["o-2"] != 2 {
+		t.Fatalf("attempts %v, want two per order: one rolled back, one committed", handler.attempts)
 	}
 }

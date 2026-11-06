@@ -177,9 +177,11 @@ func (s *Store) Claim(ctx context.Context, req outbox.ClaimRequest) ([]outbox.Re
 	return claimed, nil
 }
 
-// Advance implements outbox.Store.
+// Advance implements outbox.Store: on db.Session, it joins the transaction
+// ctx is in, where its row lock holds the record until that transaction
+// ends, and returns transaction.ErrForeignTransaction in another DB's.
 func (s *Store) Advance(ctx context.Context, lease outbox.Lease, progress int) error {
-	return s.fenced(ctx, lease, "progress = ?", progress)
+	return s.fenced(ctx, lease, "progress = GREATEST(progress, ?)", progress)
 }
 
 // Complete implements outbox.Store.
