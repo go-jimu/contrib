@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/go-jimu/components v0.12.7-0.20261106162511-abb077acf5ac
-	github.com/go-jimu/contrib/transaction/xorm v0.0.0-20261106160219-3a2bbfb79121
+	github.com/go-jimu/contrib/transaction/xorm v0.5.5
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	xorm.io/xorm v1.3.9
