@@ -6,23 +6,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
-	"strconv"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-jimu/components/transaction"
-	jimuxorm "github.com/go-jimu/contrib/database/xorm"
-	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/network"
+	jimuxorm "github.com/go-jimu/contrib/transaction/xorm"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	xormio "xorm.io/xorm"
 )
 
 const integrationMySQLImage = "mysql:8.4"
+
+// integrationDSN is the DSN of the MySQL server TestMain starts for the run.
+var integrationDSN string
 
 type itemDO struct {
 	ID    string `xorm:"pk varchar(36) 'id'"`
@@ -31,20 +30,32 @@ type itemDO struct {
 
 func (itemDO) TableName() string { return "item" }
 
-// startMySQL starts one MySQL server for the whole test binary run and
-// returns its DSN.
-var startMySQL = sync.OnceValues(func() (string, error) {
+// TestMain starts one MySQL server for every test and terminates it after
+// the run.
+func TestMain(m *testing.M) {
+	container, dsn, err := startMySQL()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	integrationDSN = dsn
+	code := m.Run()
+	terminate(container)
+	os.Exit(code)
+}
+
+func terminate(container testcontainers.Container) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := container.Terminate(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "terminate mysql container:", err)
+	}
+}
+
+func startMySQL() (testcontainers.Container, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-
-	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        integrationMySQLImage,
 			ExposedPorts: []string{"3306/tcp"},
@@ -52,34 +63,27 @@ var startMySQL = sync.OnceValues(func() (string, error) {
 				"MYSQL_ROOT_PASSWORD": "secret",
 				"MYSQL_DATABASE":      "jimu",
 			},
-			HostConfigModifier: func(hc *container.HostConfig) {
-				hc.PortBindings = network.PortMap{
-					network.MustParsePort("3306/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: strconv.Itoa(port)}},
-				}
-			},
-			// The entrypoint starts a temporary server for initialization
-			// first, so the real server is the second "ready for
-			// connections".
-			WaitingFor: wait.ForLog("ready for connections").WithOccurrence(2).WithStartupTimeout(3 * time.Minute),
+			// The entrypoint runs a temporary server for initialization first;
+			// newDB pings until the real server answers.
+			WaitingFor: wait.ForListeningPort("3306/tcp").WithStartupTimeout(3 * time.Minute),
 		},
 		Started: true,
 	})
 	if err != nil {
-		return "", fmt.Errorf("start mysql container: %w", err)
+		return nil, "", fmt.Errorf("start mysql container: %w", err)
 	}
-	// testcontainers' reaper removes the container when the test binary
-	// exits.
-	return fmt.Sprintf("root:secret@tcp(127.0.0.1:%d)/jimu?parseTime=true", port), nil
-})
+	endpoint, err := container.PortEndpoint(ctx, "3306/tcp", "")
+	if err != nil {
+		_ = container.Terminate(context.Background())
+		return nil, "", fmt.Errorf("mysql endpoint: %w", err)
+	}
+	return container, fmt.Sprintf("root:secret@tcp(%s)/jimu?parseTime=true", endpoint), nil
+}
 
 // newDB returns a DB on a fresh, empty item table.
 func newDB(t *testing.T) (*jimuxorm.DB, *xormio.Engine) {
 	t.Helper()
-	dsn, err := startMySQL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine, err := xormio.NewEngine("mysql", dsn)
+	engine, err := xormio.NewEngine("mysql", integrationDSN)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -100,11 +104,18 @@ func newDB(t *testing.T) (*jimuxorm.DB, *xormio.Engine) {
 	return db, engine
 }
 
+// pingUntilReady waits out the entrypoint's temporary server, which accepts
+// connections and then restarts.
 func pingUntilReady(engine *xormio.Engine) error {
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for {
 		err := engine.Ping()
-		if err == nil || time.Now().After(deadline) {
+		if err == nil {
+			if _, err = engine.Exec("SELECT 1"); err == nil {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -130,13 +141,17 @@ func update(ctx context.Context, db *jimuxorm.DB, id string, value int) error {
 }
 
 // count reads committed rows on the pool, outside any transaction.
-func count(t *testing.T, engine *xormio.Engine, id string) int64 {
+func count(t *testing.T, engine *xormio.Engine, ids ...string) int64 {
 	t.Helper()
-	n, err := engine.Where("id = ?", id).Count(new(itemDO))
-	if err != nil {
-		t.Fatalf("count %s: %v", id, err)
+	var total int64
+	for _, id := range ids {
+		n, err := engine.Where("id = ?", id).Count(new(itemDO))
+		if err != nil {
+			t.Fatalf("count %s: %v", id, err)
+		}
+		total += n
 	}
-	return n
+	return total
 }
 
 func TestIntegrationCommitAndRollback(t *testing.T) {
@@ -154,8 +169,8 @@ func TestIntegrationCommitAndRollback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Within() error = %v", err)
 	}
-	if count(t, engine, "a") != 1 || count(t, engine, "b") != 1 {
-		t.Fatal("committed rows are not visible")
+	if n := count(t, engine, "a", "b"); n != 2 {
+		t.Fatalf("committed rows = %d, want 2", n)
 	}
 
 	want := errors.New("use case failed")
@@ -170,6 +185,44 @@ func TestIntegrationCommitAndRollback(t *testing.T) {
 	}
 	if n := count(t, engine, "c"); n != 0 {
 		t.Fatalf("rolled-back row visible: count = %d", n)
+	}
+}
+
+func TestIntegrationPanicRollsBack(t *testing.T) {
+	db, engine := newDB(t)
+	func() {
+		defer func() {
+			if r := recover(); r != "boom" {
+				t.Fatalf("recover() = %v, want boom", r)
+			}
+		}()
+		_ = db.Manager().Within(context.Background(), func(ctx context.Context) error {
+			if err := insert(ctx, db, "panicked", 1); err != nil {
+				return err
+			}
+			panic("boom")
+		})
+	}()
+	if n := count(t, engine, "panicked"); n != 0 {
+		t.Fatalf("row written before the panic survived: count = %d", n)
+	}
+}
+
+func TestIntegrationNestedWithinIsRejected(t *testing.T) {
+	db, engine := newDB(t)
+	err := db.Manager().Within(context.Background(), func(ctx context.Context) error {
+		if err := insert(ctx, db, "outer", 1); err != nil {
+			return err
+		}
+		return db.Manager().Within(ctx, func(ctx context.Context) error {
+			return insert(ctx, db, "inner", 1)
+		})
+	})
+	if !errors.Is(err, transaction.ErrNested) {
+		t.Fatalf("Within() error = %v, want %v", err, transaction.ErrNested)
+	}
+	if n := count(t, engine, "outer", "inner"); n != 0 {
+		t.Fatalf("rows written = %d, want 0", n)
 	}
 }
 
@@ -190,9 +243,9 @@ func TestIntegrationSessionFailsClosed(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	var kept context.Context
+	var committed context.Context
 	if err := db.Manager().Within(context.Background(), func(ctx context.Context) error {
-		kept = ctx
+		committed = ctx
 		if err := insert(ctx, other, "foreign", 1); !errors.Is(err, transaction.ErrForeignTransaction) {
 			t.Errorf("Session() of another DB error = %v, want %v", err, transaction.ErrForeignTransaction)
 		}
@@ -200,11 +253,71 @@ func TestIntegrationSessionFailsClosed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Within() error = %v", err)
 	}
-	if err := insert(kept, db, "kept", 1); !errors.Is(err, transaction.ErrTransactionDone) {
-		t.Fatalf("Session() on a kept ctx error = %v, want %v", err, transaction.ErrTransactionDone)
+	var rolledBack context.Context
+	_ = db.Manager().Within(context.Background(), func(ctx context.Context) error {
+		rolledBack = ctx
+		return errors.New("roll back")
+	})
+
+	for name, kept := range map[string]context.Context{"committed": committed, "rolled back": rolledBack} {
+		if err := insert(kept, db, "kept", 1); !errors.Is(err, transaction.ErrTransactionDone) {
+			t.Errorf("Session() on a ctx kept from a %s transaction error = %v, want %v", name, err, transaction.ErrTransactionDone)
+		}
 	}
-	if count(t, engine, "foreign")+count(t, engine, "kept") != 0 {
-		t.Fatal("a rejected write reached the database")
+	if n := count(t, engine, "foreign", "kept"); n != 0 {
+		t.Fatalf("a rejected write reached the database: count = %d", n)
+	}
+}
+
+// TestIntegrationSessionEndedByRepository covers a repository that ends the
+// transaction's session itself; xorm then autocommits later statements on
+// that session.
+func TestIntegrationSessionEndedByRepository(t *testing.T) {
+	endings := map[string]func(*xormio.Session) error{
+		"Close":    (*xormio.Session).Close,
+		"Commit":   (*xormio.Session).Commit,
+		"Rollback": (*xormio.Session).Rollback,
+	}
+	for name, end := range endings {
+		t.Run(name+" then another statement", func(t *testing.T) {
+			db, engine := newDB(t)
+			err := db.Manager().Within(context.Background(), func(ctx context.Context) error {
+				session, err := db.Session(ctx)
+				if err != nil {
+					return err
+				}
+				if err := end(session); err != nil {
+					return err
+				}
+				return insert(ctx, db, "after", 1)
+			})
+			if !errors.Is(err, jimuxorm.ErrSessionEnded) || !errors.Is(err, transaction.ErrTransactionDone) {
+				t.Fatalf("Within() error = %v, want ErrSessionEnded and ErrTransactionDone", err)
+			}
+			if n := count(t, engine, "after"); n != 0 {
+				t.Fatalf("statement after the session ended autocommitted: count = %d", n)
+			}
+		})
+		t.Run(name+" then return nil", func(t *testing.T) {
+			db, _ := newDB(t)
+			afterCommit := false
+			err := db.Manager().Within(context.Background(), func(ctx context.Context) error {
+				if err := transaction.AfterCommit(ctx, func(context.Context) { afterCommit = true }); err != nil {
+					return err
+				}
+				session, err := db.Session(ctx)
+				if err != nil {
+					return err
+				}
+				return end(session)
+			})
+			if !errors.Is(err, jimuxorm.ErrSessionEnded) || !errors.Is(err, transaction.ErrOutcomeUnknown) {
+				t.Fatalf("Within() error = %v, want ErrSessionEnded and ErrOutcomeUnknown", err)
+			}
+			if afterCommit {
+				t.Fatal("AfterCommit hook ran although the Manager never committed")
+			}
+		})
 	}
 }
 
@@ -232,8 +345,8 @@ func TestIntegrationWithinOrJoin(t *testing.T) {
 		}
 		return saveTwo(ctx, "joined")
 	})
-	if count(t, engine, "outer")+count(t, engine, "joined-1") != 0 {
-		t.Fatal("joined failure did not roll back the caller's transaction")
+	if n := count(t, engine, "outer", "joined-1"); n != 0 {
+		t.Fatalf("joined failure did not roll back the caller's transaction: count = %d", n)
 	}
 }
 
@@ -251,11 +364,11 @@ func TestIntegrationDeadlockIsConflict(t *testing.T) {
 	holding.Add(2)
 	run := func(first, second string) error {
 		return db.Manager().Within(context.Background(), func(ctx context.Context) error {
-			if err := update(ctx, db, first, 1); err != nil {
-				holding.Done()
+			err := update(ctx, db, first, 1)
+			holding.Done()
+			if err != nil {
 				return err
 			}
-			holding.Done()
 			holding.Wait()
 			return update(ctx, db, second, 1)
 		})
@@ -292,11 +405,11 @@ func TestIntegrationLockWaitTimeoutIsConflictAndRollsBack(t *testing.T) {
 	holder := make(chan error, 1)
 	go func() {
 		holder <- db.Manager().Within(context.Background(), func(ctx context.Context) error {
-			if err := update(ctx, db, "locked", 1); err != nil {
-				close(locked)
+			err := update(ctx, db, "locked", 1)
+			close(locked)
+			if err != nil {
 				return err
 			}
-			close(locked)
 			<-release
 			return nil
 		})

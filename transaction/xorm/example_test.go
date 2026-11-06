@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/go-jimu/components/transaction"
-	jimuxorm "github.com/go-jimu/contrib/database/xorm"
+	jimuxorm "github.com/go-jimu/contrib/transaction/xorm"
 	_ "github.com/go-sql-driver/mysql" // registers the "mysql" database/sql driver
 	xormio "xorm.io/xorm"
 )

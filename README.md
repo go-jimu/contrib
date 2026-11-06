@@ -14,9 +14,9 @@ so applications can depend only on the adapters they actually use.
 | `config/etcd` | `components/config` | etcd |
 | `config/kubernetes` | `components/config` | Kubernetes ConfigMap |
 | `config/nacos` | `components/config` | Nacos |
-| `database/xorm` | `components/transaction` | xorm (MySQL conflict classification by default) |
 | `message/kafka` | `components/ddd/message` | Kafka through franz-go |
 | `taskqueue/asynq` | `components/taskqueue` | asynq |
+| `transaction/xorm` | `components/transaction` | xorm (MySQL conflicts) |
 
 ## Install
 
@@ -75,7 +75,7 @@ make benchmark
 Kafka and xorm integration tests are build-tagged and require Docker:
 
 ```sh
-cd message/kafka   # or database/xorm
+cd message/kafka   # or transaction/xorm
 go test -tags=integration ./...
 ```
 

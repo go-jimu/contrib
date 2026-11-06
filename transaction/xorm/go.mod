@@ -1,11 +1,10 @@
-module github.com/go-jimu/contrib/database/xorm
+module github.com/go-jimu/contrib/transaction/xorm
 
 go 1.26.0
 
 require (
 	github.com/go-jimu/components v0.12.6-0.20261106150555-d22ea61adcc2
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/moby/moby/api v1.54.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	xorm.io/xorm v1.3.9
 )
@@ -40,6 +39,7 @@ require (
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.2.0 // indirect
+	github.com/moby/moby/api v1.54.1 // indirect
 	github.com/moby/moby/client v0.4.0 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.6.0 // indirect

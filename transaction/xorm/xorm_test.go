@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	jimuxorm "github.com/go-jimu/contrib/database/xorm"
+	jimuxorm "github.com/go-jimu/contrib/transaction/xorm"
 	"github.com/go-sql-driver/mysql"
 	xormio "xorm.io/xorm"
 )
@@ -29,17 +29,24 @@ func TestNewRejectsNilEngine(t *testing.T) {
 	}
 }
 
+func TestNewBuildsManager(t *testing.T) {
+	db, err := jimuxorm.New(newOfflineEngine(t))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if db.Manager() == nil {
+		t.Fatal("Manager() = nil")
+	}
+}
+
 func TestSessionOutsideTransactionUsesPool(t *testing.T) {
-	db, err := jimuxorm.New(newOfflineEngine(t), jimuxorm.WithConflict(nil))
+	db, err := jimuxorm.New(newOfflineEngine(t))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	session, err := db.Session(context.Background())
 	if err != nil || session == nil {
 		t.Fatalf("Session() = %v, %v; want a pool session", session, err)
-	}
-	if db.Manager() == nil {
-		t.Fatal("Manager() = nil")
 	}
 }
 
