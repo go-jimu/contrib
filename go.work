@@ -6,6 +6,7 @@ use (
 	./config/etcd
 	./config/nacos
 	./config/kubernetes
+	./event/outbox/xorm
 	./message/kafka
 	./taskqueue/asynq
 	./transaction/xorm

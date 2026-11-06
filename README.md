@@ -17,6 +17,7 @@ so applications can depend only on the adapters they actually use.
 | `message/kafka` | `components/ddd/message` | Kafka through franz-go |
 | `taskqueue/asynq` | `components/taskqueue` | asynq |
 | `transaction/xorm` | `components/transaction` | xorm (MySQL conflicts) |
+| `event/outbox/xorm` | `components/ddd/event/outbox` | xorm (MySQL 8.0+ outbox records) |
 
 ## Install
 
