@@ -33,6 +33,7 @@ type Consumer struct {
 
 	client        pollClient
 	failurePolicy FailurePolicy
+	life          lifecycle
 
 	mu    sync.Mutex
 	heads map[topicPartition]*headState
@@ -152,19 +153,25 @@ func (c *Consumer) Close() {
 	}
 }
 
-// Run consumes batches until ctx ends, then returns nil. It returns an error
-// when the consumer cannot continue: ErrNilClient, a poll error that stops it,
-// an error matching ErrCommitFailed, or one matching ErrStopped when the
-// FailurePolicy chose FailureActionStop. Call Run from one goroutine only, and
-// once per client. See Consumer offsets and rebalances, Poll errors, and
-// Shutdown in the package documentation.
+// Run consumes batches until Shutdown stops it or ctx ends, then returns
+// nil; ending ctx forces the stop. It returns an error when the consumer
+// cannot continue: ErrNilClient, a poll error that stops it, an error
+// matching ErrCommitFailed, or one matching ErrStopped when the FailurePolicy
+// chose FailureActionStop. Call Run from one goroutine only, and once per
+// client. See Consumer offsets and rebalances, Poll errors, and Shutdown in
+// the package documentation.
 func (c *Consumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
+	stop, ctx, end, ok := c.life.begin(ctx)
+	if !ok {
+		return nil
+	}
+	defer end()
 	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka consumer started")
 	for {
-		shutdown, err := c.pollOnce(ctx)
+		shutdown, err := c.pollOnce(stop, ctx)
 		if err != nil {
 			c.log.LogAttrs(ctx, slog.LevelError, "kafka consumer stopped", sloghelper.Error(err))
 			return err
@@ -176,23 +183,33 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-// pollOnce handles one poll and reports whether ctx has ended. It always
-// lets the group rebalance before it returns, after the batch is committed
-// and rewound. Records polled when ctx has already ended are rewound by
-// processBatch, not dropped.
-func (c *Consumer) pollOnce(ctx context.Context) (bool, error) {
-	fetches := c.client.PollRecords(ctx, c.cfg.maxPollRecords)
+// Shutdown stops Run gracefully: Run polls no more, each partition stops
+// before its next record, and the running handlers finish on a ctx that
+// Shutdown does not cancel. It returns nil once Run has returned. When ctx
+// ends first, it cancels the handlers' ctx and returns ctx.Err() without
+// waiting. Shutdown before Run makes Run return nil at once. See Shutdown in
+// the package documentation.
+func (c *Consumer) Shutdown(ctx context.Context) error {
+	return c.life.shutdownRun(ctx)
+}
+
+// pollOnce handles one poll and reports whether stop has ended. ctx, the
+// force ctx, bounds the handlers. It always lets the group rebalance before
+// it returns, after the batch is committed and rewound. Records polled when
+// stop has already ended are rewound by processBatch, not dropped.
+func (c *Consumer) pollOnce(stop, ctx context.Context) (bool, error) {
+	fetches := c.client.PollRecords(stop, c.cfg.maxPollRecords)
 	defer c.client.AllowRebalance()
 
-	pollErr := c.pollError(ctx, fetches)
+	pollErr := c.pollError(stop, fetches)
 	if batches := splitByPartition(fetches); len(batches) > 0 {
-		if err := c.processBatch(ctx, batches); err != nil {
+		if err := c.processBatch(stop, ctx, batches); err != nil {
 			return true, err
 		}
-	} else if pollErr != nil && ctx.Err() == nil {
+	} else if pollErr != nil && stop.Err() == nil {
 		return true, pollErr
 	}
-	return ctx.Err() != nil, nil
+	return stop.Err() != nil, nil
 }
 
 type partitionBatch struct {
@@ -230,14 +247,14 @@ type partitionResult struct {
 	settled int
 }
 
-func (c *Consumer) processBatch(ctx context.Context, batches []partitionBatch) error {
+func (c *Consumer) processBatch(stop, ctx context.Context, batches []partitionBatch) error {
 	start := time.Now()
 	results := make([]partitionResult, len(batches))
 	var stopping atomic.Bool
 	var wg sync.WaitGroup
 	for i, batch := range batches {
 		wg.Go(func() {
-			results[i] = c.processPartition(ctx, batch, &stopping)
+			results[i] = c.processPartition(stop, ctx, batch, &stopping)
 		})
 	}
 	wg.Wait()
@@ -271,10 +288,10 @@ func (c *Consumer) logBatch(ctx context.Context, batches []partitionBatch, resul
 	}
 }
 
-func (c *Consumer) processPartition(ctx context.Context, batch partitionBatch, stopping *atomic.Bool) partitionResult {
+func (c *Consumer) processPartition(stop, ctx context.Context, batch partitionBatch, stopping *atomic.Bool) partitionResult {
 	var result partitionResult
 	for _, record := range batch.records {
-		if ctx.Err() != nil || stopping.Load() {
+		if stop.Err() != nil || stopping.Load() {
 			result.next = record
 			return result
 		}
@@ -410,8 +427,10 @@ func (c *Consumer) processRecord(ctx context.Context, tp topicPartition, record 
 		return recordOutcome{kind: outcomeDone}
 	}
 
-	// Once Run's ctx has ended, leave the record undecided and uncommitted so
-	// Kafka redelivers it: the failure may stem from the ended ctx.
+	// Once the stop is forced, by Run's ctx or Shutdown's ending, leave the
+	// record undecided and uncommitted so Kafka redelivers it: the failure
+	// may stem from the ended ctx. A failure during a graceful Shutdown is
+	// decided as usual.
 	if ctx.Err() != nil {
 		return recordOutcome{kind: outcomeLater}
 	}

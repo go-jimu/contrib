@@ -22,10 +22,10 @@ const (
 )
 
 // FailurePolicy decides each message-level Consumer failure (StageDecode,
-// StageUnhandled, or StageHandle) while Run's ctx is live. Error.Attempt
+// StageUnhandled, or StageHandle), unless the stop is forced. Error.Attempt
 // counts the failed attempts at the record, this one included. An unknown
-// FailureAction counts as FailureActionDrop. See Consumer failures, and the
-// concurrency contract in Handlers, in the package documentation.
+// FailureAction counts as FailureActionDrop. See Consumer failures, Shutdown,
+// and the concurrency contract in Handlers, in the package documentation.
 type FailurePolicy interface {
 	Decide(context.Context, Error) FailureAction
 }

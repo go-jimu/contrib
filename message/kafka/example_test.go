@@ -114,12 +114,18 @@ func ExampleNewConsumer() {
 		panic(err)
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumer.Run(ctx) }()
+	go func() { done <- consumer.Run(context.Background()) }()
 
-	// On shutdown: cancel, wait for Run, then close the client (deferred).
-	stop()
+	// On shutdown: let running handlers finish within the deadline, wait for
+	// Run, then close the client (deferred).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := consumer.Shutdown(ctx); err != nil {
+		// The deadline passed: running handlers were canceled and their
+		// records are left for redelivery.
+		slog.WarnContext(ctx, "kafka consumer shutdown forced", slog.Any("error", err))
+	}
 	if err := <-done; err != nil {
 		// Run failed while consuming: the consumer cannot continue.
 		panic(err)

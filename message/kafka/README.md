@@ -96,6 +96,7 @@ func (paidHandler) Handle(ctx context.Context, msg message.Message) error {
 	return nil
 }
 
+// run consumes until ctx ends, then shuts the consumer down gracefully.
 func run(ctx context.Context) error {
 	client, err := kafka.NewClient(
 		kgo.SeedBrokers("localhost:9092"),
@@ -131,9 +132,25 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	return consumer.Run(ctx)
+	done := make(chan error, 1)
+	go func() { done <- consumer.Run(context.Background()) }()
+
+	select {
+	case err := <-done:
+		return err // the consumer cannot continue
+	case <-ctx.Done():
+	}
+	// Running handlers finish and are committed; past the deadline they are
+	// canceled and their records redelivered later.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = consumer.Shutdown(shutdownCtx)
+	return <-done
 }
 ```
+
+`Run`'s own ctx is not the way to stop it: ending it cancels running
+handlers at once. `Shutdown` stops polling and lets them finish first.
 
 `RetryPolicy` retries a handler failure in place, after a backoff, keeping the
 partition's order, and drops the record after 3 attempts. See "Consumer

@@ -30,10 +30,10 @@ const (
 )
 
 // ShareFailurePolicy decides how each message-level ShareConsumer failure
-// (StageDecode, StageUnhandled, or StageHandle) is acknowledged while Run's
-// ctx is live. Error.Attempt is the record's delivery count. An unknown
-// ShareAction counts as ShareActionRelease. See Share groups, and the
-// concurrency contract in Handlers, in the package documentation.
+// (StageDecode, StageUnhandled, or StageHandle) is acknowledged, unless the
+// stop is forced. Error.Attempt is the record's delivery count. An unknown
+// ShareAction counts as ShareActionRelease. See Share groups, Shutdown, and
+// the concurrency contract in Handlers, in the package documentation.
 type ShareFailurePolicy interface {
 	Decide(context.Context, Error) ShareAction
 }
@@ -72,6 +72,7 @@ type ShareConsumer struct {
 
 	client shareClient
 	policy ShareFailurePolicy
+	life   lifecycle
 
 	// ack, deliveryCount, and acquisitionDeadline are kgo.Record methods,
 	// replaced in tests.
@@ -150,16 +151,22 @@ func (c *ShareConsumer) Close() {
 	}
 }
 
-// Run consumes batches until ctx ends, then returns nil. It returns an error
-// when the consumer cannot continue: ErrNilClient, or a poll error that stops
-// it. Call Run from one goroutine only, and once per client. See Share
-// groups, Poll errors, and Shutdown in the package documentation.
+// Run consumes batches until Shutdown stops it or ctx ends, then returns
+// nil; ending ctx forces the stop. It returns an error when the consumer
+// cannot continue: ErrNilClient, or a poll error that stops it. Call Run from
+// one goroutine only, and once per client. See Share groups, Poll errors, and
+// Shutdown in the package documentation.
 func (c *ShareConsumer) Run(ctx context.Context) error {
 	if c.client == nil {
 		return ErrNilClient
 	}
+	stop, ctx, end, ok := c.life.begin(ctx)
+	if !ok {
+		return nil
+	}
+	defer end()
 	c.log.LogAttrs(ctx, slog.LevelInfo, "kafka share consumer started")
-	err := c.run(ctx)
+	err := c.run(stop, ctx)
 	c.flush(ctx)
 	if err != nil {
 		c.log.LogAttrs(ctx, slog.LevelError, "kafka share consumer stopped", sloghelper.Error(err))
@@ -169,18 +176,29 @@ func (c *ShareConsumer) Run(ctx context.Context) error {
 	return nil
 }
 
-func (c *ShareConsumer) run(ctx context.Context) error {
+// Shutdown stops Run gracefully: Run polls no more, releases the records it
+// has not started, and lets the running handlers finish on a ctx that
+// Shutdown does not cancel. It returns nil once Run has returned. When ctx
+// ends first, it cancels the handlers' ctx and returns ctx.Err() without
+// waiting. Shutdown before Run makes Run return nil at once. See Shutdown in
+// the package documentation.
+func (c *ShareConsumer) Shutdown(ctx context.Context) error {
+	return c.life.shutdownRun(ctx)
+}
+
+// run polls until stop ends; ctx, the force ctx, bounds the handlers.
+func (c *ShareConsumer) run(stop, ctx context.Context) error {
 	for {
-		fetches := c.client.PollRecords(ctx, c.batchSize())
-		pollErr := c.pollError(ctx, fetches)
-		// processBatch acknowledges every record, releasing them when ctx
+		fetches := c.client.PollRecords(stop, c.batchSize())
+		pollErr := c.pollError(stop, fetches)
+		// processBatch acknowledges every record, releasing them when stop
 		// has ended, so the next poll auto-accepts nothing.
 		if records := fetches.Records(); len(records) > 0 {
-			c.processBatch(ctx, records)
-		} else if pollErr != nil && ctx.Err() == nil {
+			c.processBatch(stop, ctx, records)
+		} else if pollErr != nil && stop.Err() == nil {
 			return pollErr
 		}
-		if ctx.Err() != nil {
+		if stop.Err() != nil {
 			return nil
 		}
 	}
@@ -189,7 +207,7 @@ func (c *ShareConsumer) run(ctx context.Context) error {
 // processBatch acknowledges every record exactly once: the share client
 // accepts any record left unacknowledged at the next poll, which would lose
 // it.
-func (c *ShareConsumer) processBatch(ctx context.Context, records []*kgo.Record) {
+func (c *ShareConsumer) processBatch(stop, ctx context.Context, records []*kgo.Record) {
 	sem := make(chan struct{}, c.concurrency())
 	var wg sync.WaitGroup
 	for _, record := range records {
@@ -197,9 +215,9 @@ func (c *ShareConsumer) processBatch(ctx context.Context, records []*kgo.Record)
 		select {
 		case sem <- struct{}{}:
 			acquired = true
-		case <-ctx.Done():
+		case <-stop.Done():
 		}
-		if ctx.Err() != nil {
+		if stop.Err() != nil {
 			if acquired {
 				<-sem
 			}
@@ -226,7 +244,8 @@ func (c *ShareConsumer) processRecord(ctx context.Context, record *kgo.Record) k
 		return kgo.AckAccept
 	}
 	if ctx.Err() != nil {
-		// Shutdown, not a failure of the record: deliver it again.
+		// A forced stop, not a failure of the record: deliver it again. A
+		// failure during a graceful Shutdown is decided as usual.
 		return kgo.AckRelease
 	}
 

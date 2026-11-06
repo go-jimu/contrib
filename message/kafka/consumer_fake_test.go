@@ -28,6 +28,9 @@ type fakeConsumerClient struct {
 	commitErr error
 	// commitHook runs inside CommitRecords, before the ctx is inspected.
 	commitHook func()
+	// polled receives the ctx of the first poll, so a test can wait for
+	// Run's stop.
+	polled chan context.Context
 
 	pollCount     int
 	pollMax       []int
@@ -50,6 +53,9 @@ func (f *fakeConsumerClient) PollRecords(ctx context.Context, maxRecords int) kg
 	f.pollCount++
 	f.pollMax = append(f.pollMax, maxRecords)
 	hook := f.pollHooks[f.pollCount]
+	if f.polled != nil && f.pollCount == 1 {
+		f.polled <- ctx
+	}
 	f.mu.Unlock()
 	if hook != nil {
 		hook()

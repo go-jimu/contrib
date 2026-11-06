@@ -34,11 +34,12 @@
 //     message.Subscriber to the bounded contexts. Before Run starts, each
 //     registers a payload factory for every Kind it consumes and subscribes
 //     its handlers.
-//  4. Start Run on its own goroutine.
-//  5. Shut down: cancel Run's ctx, wait for Run to return, then close the
-//     client after every publisher sharing it has stopped. Close closes it
-//     when WithCloseClient(true) was set. A client serves one Run: to consume
-//     again, build a new client and consumer.
+//  4. Start Run on its own goroutine, with a ctx that stays live until the
+//     process is done with the consumer.
+//  5. Shut down: call Shutdown with the shutdown deadline, wait for Run to
+//     return, then close the client after every publisher sharing it has
+//     stopped. Close closes it when WithCloseClient(true) was set. A client
+//     serves one Run: to consume again, build a new client and consumer.
 //
 // Composition is done when the constructor returned no error, every
 // subscribed Kind is registered and its topic consumed, and shutdown follows
@@ -92,11 +93,15 @@
 // Recoverer, and the ErrorObserver are called concurrently: make each safe for
 // concurrent use and quick to return.
 //
-// Handlers receive Run's ctx, bounded by WithHandlerTimeout when set. Return
+// Handlers receive a ctx with the values of Run's ctx, bounded by
+// WithHandlerTimeout when set. It ends when that timeout does, when Run's ctx
+// ends, or when Shutdown's ctx ends; a graceful Shutdown alone does not end
+// it, so the running handlers finish their work (see Shutdown). Return
 // promptly when ctx ends: a handler past its timeout fails with
 // ErrHandlerTimeout and the consumer moves on, while a goroutine that ignores
-// ctx keeps running alongside the retry of its record. At shutdown Run waits
-// for running handlers, up to the rest of their timeout.
+// ctx keeps running alongside the retry of its record. When the stop is
+// forced, Run still waits for running handlers, up to the rest of their
+// timeout.
 //
 // # Consumer failures
 //
@@ -196,15 +201,37 @@
 //
 // # Shutdown
 //
-// When Run's ctx ends, the Consumer stops each partition before its next
-// record, commits the settled records, and rewinds the rest; the
-// ShareConsumer releases the records it has not handled and flushes its
-// acknowledgements. Both then return nil, and the ended ctx is not observed.
-// A failure that happens after ctx ended, such as a handler cut short, is
-// left for redelivery without the policy, the ErrorObserver, or a log.
-// Commits and acknowledgement flushes run on a ctx detached from Run's,
-// bounded by a timeout, so shutdown completes them. Run lists the errors that
-// stop it early; treat them as fatal and stop or restart the process.
+// Stop a consumer with Shutdown(ctx), where ctx carries the shutdown
+// deadline. The stop is graceful first and forced once ctx ends:
+//
+//   - Graceful: Run polls no more. The Consumer stops each partition before
+//     its next record; the ShareConsumer releases the records it has not
+//     started. Running handlers finish on a ctx Shutdown does not cancel.
+//     Their records are settled as at any other time: committed or accepted
+//     on success, and decided by the FailurePolicy or ShareFailurePolicy,
+//     and observed, on failure. The Consumer then commits the settled records
+//     and rewinds the rest; the ShareConsumer flushes its acknowledgements.
+//     Run returns nil and Shutdown returns nil.
+//   - Forced, when Shutdown's ctx ends first: the handlers' ctx is canceled
+//     and Shutdown returns ctx.Err() without waiting for Run. A record whose
+//     handler fails after the force, such as one cut short, is left for
+//     redelivery (the Consumer leaves it uncommitted, the ShareConsumer
+//     releases it) without the policy, the ErrorObserver, or a log. Run
+//     returns nil once its handlers have returned, up to the rest of their
+//     timeout; without WithHandlerTimeout, a handler that ignores ctx holds
+//     Run indefinitely.
+//
+// Ending Run's ctx forces the stop at once, as an expired Shutdown does.
+// Shutdown before Run makes Run return nil without polling; Shutdown after
+// Run returned, and a second Shutdown, return nil once Run has returned. The
+// ended ctx is not observed as a poll failure. Commits and acknowledgement
+// flushes run on a ctx detached from Run's, bounded by a timeout, so a
+// forced stop still completes them.
+//
+// Size the deadline to cover the handlers: with WithHandlerTimeout set,
+// Shutdown's ctx should outlast it, or a running handler is canceled before
+// its timeout. Run lists the errors that stop it early; treat them as fatal
+// and stop or restart the process.
 //
 // # Logging
 //

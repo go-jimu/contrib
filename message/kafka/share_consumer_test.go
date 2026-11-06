@@ -25,6 +25,9 @@ type fakeShareClient struct {
 	closed    bool
 	pollCount int
 	pollMax   []int
+	// polled receives the ctx of the first poll, so a test can wait for
+	// Run's stop.
+	polled chan context.Context
 	// acks and lastPolled check that every record of a poll is acknowledged
 	// before the next poll: the real client auto-accepts the rest.
 	acks       *ackRecorder
@@ -37,6 +40,9 @@ func (f *fakeShareClient) PollRecords(ctx context.Context, maxRecords int) kgo.F
 	f.pollMax = append(f.pollMax, maxRecords)
 	hook := f.pollHooks[f.pollCount]
 	f.checkAcked()
+	if f.polled != nil && f.pollCount == 1 {
+		f.polled <- ctx
+	}
 	f.mu.Unlock()
 	if hook != nil {
 		hook()

@@ -53,8 +53,9 @@ func (d *dispatcher) observe(ctx context.Context, failure Error) {
 }
 
 // handle routes msg to its handlers, bounded by timeout when it is positive.
-// When ctx ends first, it still waits for the handlers to return, up to the
-// rest of the timeout, so that Run returns after them.
+// ctx is Run's force ctx. When ctx ends first, it still waits for the
+// handlers to return, up to the rest of the timeout, so that Run returns
+// after them.
 func (d *dispatcher) handle(ctx context.Context, record *kgo.Record, msg message.Message, timeout time.Duration) error {
 	if timeout <= 0 {
 		return d.callHandlers(ctx, msg)
@@ -95,7 +96,7 @@ func (d *dispatcher) handle(ctx context.Context, record *kgo.Record, msg message
 }
 
 // timeoutError marks err as a timeout when the handlers failed because their
-// timeout, not Run's ctx, ended.
+// timeout, not a forced stop, ended.
 func timeoutError(ctx, handlerCtx context.Context, timeout time.Duration, err error) error {
 	if err != nil && ctx.Err() == nil && errors.Is(context.Cause(handlerCtx), ErrHandlerTimeout) && !errors.Is(err, ErrHandlerTimeout) {
 		return fmt.Errorf("%w after %s: %w", ErrHandlerTimeout, timeout, err)
