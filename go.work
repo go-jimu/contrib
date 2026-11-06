@@ -8,6 +8,7 @@ use (
 	./config/kubernetes
 	./message/kafka
 	./taskqueue/asynq
+	./transaction/xorm
 )
 
 // etcd uses the split google.golang.org/genproto/googleapis/* modules, while
