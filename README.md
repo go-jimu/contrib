@@ -14,6 +14,7 @@ so applications can depend only on the adapters they actually use.
 | `config/etcd` | `components/config` | etcd |
 | `config/kubernetes` | `components/config` | Kubernetes ConfigMap |
 | `config/nacos` | `components/config` | Nacos |
+| `database/xorm` | `components/transaction` | xorm (MySQL conflict classification by default) |
 | `message/kafka` | `components/ddd/message` | Kafka through franz-go |
 | `taskqueue/asynq` | `components/taskqueue` | asynq |
 
@@ -40,8 +41,9 @@ provider-specific usage examples.
 Provider packages adapt concrete SDKs to stable `components` contracts. Keep
 provider imports in infrastructure or runtime wiring. Business and application
 code should depend on the provider-neutral component interfaces such as
-`config.Source`, `message.Publisher`, `message.Subscriber`,
-`taskqueue.Enqueuer`, `taskqueue.Processor`, and `taskqueue.Worker`.
+`config.Source`, `transaction.Transactor`, `message.Publisher`,
+`message.Subscriber`, `taskqueue.Enqueuer`, `taskqueue.Processor`, and
+`taskqueue.Worker`.
 
 ## Development
 
@@ -70,10 +72,10 @@ Run benchmarks:
 make benchmark
 ```
 
-Kafka integration tests are build-tagged and require Docker:
+Kafka and xorm integration tests are build-tagged and require Docker:
 
 ```sh
-cd message/kafka
+cd message/kafka   # or database/xorm
 go test -tags=integration ./...
 ```
 
