@@ -42,8 +42,8 @@ github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLA
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
 github.com/fsnotify/fsnotify v1.4.7/go.mod h1:jwhsz4b93w/PPRr/qN1Yymfu8t87LnFCMoQvtojpjFo=
-github.com/go-jimu/components v0.12.7 h1:x6jb3sjmdTD2D1FM6ztpshuPxHrO4s30we2pHNJh+4A=
-github.com/go-jimu/components v0.12.7/go.mod h1:jC3XNWmkMl50pAiyPP5BqHyv6SY3Q7wVgzKvbVx1xc4=
+github.com/go-jimu/components v0.12.8-0.20261106165513-2611dbc144fd h1:AMWPtYeVCcltVRSarYdVozdsuuMMHSN5LrO8FGyXbD0=
+github.com/go-jimu/components v0.12.8-0.20261106165513-2611dbc144fd/go.mod h1:jC3XNWmkMl50pAiyPP5BqHyv6SY3Q7wVgzKvbVx1xc4=
 github.com/go-jimu/contrib/transaction/xorm v0.5.5 h1:454lwQ1WqSghiGlMXhlP5bXjBhcP0IoJQ/XJ7mC9u6I=
 github.com/go-jimu/contrib/transaction/xorm v0.5.5/go.mod h1:vVjTZYakbOaotHwnbDQVlHFPrOlh52j/9u1Jxzw9hEg=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
