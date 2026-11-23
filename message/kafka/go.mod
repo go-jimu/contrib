@@ -3,7 +3,7 @@ module github.com/go-jimu/contrib/message/kafka
 go 1.26.0
 
 require (
-	github.com/go-jimu/components v0.12.0
+	github.com/go-jimu/components v0.12.12-0.20261123031027-08541406f291
 	github.com/moby/moby/api v1.54.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/twmb/franz-go v1.22.2

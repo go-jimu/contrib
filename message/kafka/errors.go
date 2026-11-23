@@ -94,7 +94,8 @@ var (
 	// WithHandlerTimeout duration. It is a StageHandle failure.
 	ErrHandlerTimeout = errors.New("message handler timed out")
 	// ErrNonRetryable matches an error wrapped with NonRetryable: a failure a
-	// retry cannot fix. The built-in policies do not retry it.
+	// retry cannot fix. The built-in policies do not retry it, nor an error
+	// matching the provider-neutral message.ErrPermanent.
 	ErrNonRetryable = errors.New("non-retryable failure")
 	// ErrRecoverFailed wraps an error returned by the Recoverer.
 	ErrRecoverFailed = errors.New("recover failed")
