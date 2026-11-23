@@ -32,8 +32,10 @@ const (
 // ShareFailurePolicy decides how each message-level ShareConsumer failure
 // (StageDecode, StageUnhandled, or StageHandle) is acknowledged, unless the
 // stop is forced. Error.Attempt is the record's delivery count. An unknown
-// ShareAction counts as ShareActionRelease. See Share groups, Shutdown, and
-// the concurrency contract in Handlers, in the package documentation.
+// ShareAction counts as ShareActionRelease. A custom policy should reject an
+// error matching message.ErrPermanent, as handlers rely on; calling
+// DefaultRetryable keeps that. See Share groups, Shutdown, and the
+// concurrency contract in Handlers, in the package documentation.
 type ShareFailurePolicy interface {
 	Decide(context.Context, Error) ShareAction
 }

@@ -55,7 +55,9 @@ type RetryConfig struct {
 	// 0 or less means 3.
 	MaxAttempts int
 	// Retryable reports whether a failure may be retried. nil means
-	// DefaultRetryable.
+	// DefaultRetryable. A custom Retryable should turn down an error matching
+	// message.ErrPermanent, as handlers rely on; calling DefaultRetryable
+	// first keeps that.
 	Retryable func(Error) bool
 	// OnExhausted is the action for a failure that is not retryable or has
 	// used MaxAttempts: FailureActionDrop (the zero value) or

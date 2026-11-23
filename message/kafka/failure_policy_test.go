@@ -95,15 +95,16 @@ func TestDefaultRetryBackoff(t *testing.T) {
 	}
 }
 
-// Intent: NonRetryable marks an error without hiding it.
+// Intent: NonRetryable marks an error, for this package and provider-neutral
+// policies alike, without hiding it.
 func TestNonRetryable(t *testing.T) {
 	if NonRetryable(nil) != nil {
 		t.Fatal("NonRetryable(nil) != nil")
 	}
 	cause := errors.New("order does not exist")
 	err := NonRetryable(cause)
-	if !errors.Is(err, ErrNonRetryable) || !errors.Is(err, cause) {
-		t.Fatalf("%v does not match ErrNonRetryable and its cause", err)
+	if !errors.Is(err, ErrNonRetryable) || !errors.Is(err, message.ErrPermanent) || !errors.Is(err, cause) {
+		t.Fatalf("%v does not match ErrNonRetryable, message.ErrPermanent, and its cause", err)
 	}
 	if err.Error() != cause.Error() {
 		t.Fatalf("Error() = %q, want %q", err.Error(), cause.Error())

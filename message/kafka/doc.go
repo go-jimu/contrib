@@ -139,8 +139,11 @@
 // provider-neutral message.ErrPermanent, as in
 // fmt.Errorf("%w: email is required", message.ErrPermanent), or by returning
 // NonRetryable(err); it goes to OnExhausted at once, as decode and unhandled
-// failures do. Prefer message.ErrPermanent in a handler that should not
-// import this package.
+// failures do. NonRetryable errors also match message.ErrPermanent. Prefer
+// message.ErrPermanent in a handler that should not import this package. A
+// custom Retryable or FailurePolicy decides on its own; to keep this promise
+// to handlers, it turns down message.ErrPermanent, for example by calling
+// DefaultRetryable.
 //
 // A record retried in place holds up the rest of its partition until it is
 // settled, so a record that always fails delays the records behind it by the
