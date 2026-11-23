@@ -94,7 +94,9 @@ var (
 	// WithHandlerTimeout duration. It is a StageHandle failure.
 	ErrHandlerTimeout = errors.New("message handler timed out")
 	// ErrNonRetryable matches an error wrapped with NonRetryable: a failure a
-	// retry cannot fix. The built-in policies do not retry it.
+	// retry cannot fix. The built-in policies do not retry it, nor an error
+	// matching the provider-neutral message.ErrPermanent, which NonRetryable
+	// errors also match.
 	ErrNonRetryable = errors.New("non-retryable failure")
 	// ErrRecoverFailed wraps an error returned by the Recoverer.
 	ErrRecoverFailed = errors.New("recover failed")
@@ -129,10 +131,12 @@ func (e *PanicError) Unwrap() []error {
 }
 
 // NonRetryable marks err as a failure a retry cannot fix, such as invalid
-// input or a missing entity. The result matches ErrNonRetryable and err with
-// errors.Is. A handler returns it so that RetryPolicy goes straight to its
-// exhausted action and the ShareConsumer rejects the record. NonRetryable(nil)
-// returns nil.
+// input or a missing entity. The result matches ErrNonRetryable,
+// message.ErrPermanent, and err with errors.Is, so a custom Retryable or
+// policy need check only message.ErrPermanent. A handler returns it so that
+// RetryPolicy goes straight to its exhausted action and the ShareConsumer
+// rejects the record. A handler that should not import this package wraps
+// message.ErrPermanent instead. NonRetryable(nil) returns nil.
 func NonRetryable(err error) error {
 	if err == nil {
 		return nil
@@ -149,5 +153,5 @@ func (e *nonRetryableError) Error() string {
 }
 
 func (e *nonRetryableError) Unwrap() []error {
-	return []error{ErrNonRetryable, e.err}
+	return []error{ErrNonRetryable, message.ErrPermanent, e.err}
 }

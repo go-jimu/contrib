@@ -26,6 +26,7 @@ func TestRetryPolicyDecisionTable(t *testing.T) {
 		{"handler timeout retries", RetryConfig{}, Error{Stage: StageHandle, Err: fmt.Errorf("%w after 1s", ErrHandlerTimeout), Attempt: 1}, FailureActionRetry},
 		{"handler panic retries", RetryConfig{}, Error{Stage: StageHandle, Err: &PanicError{Value: "boom"}, Attempt: 1}, FailureActionRetry},
 		{"non-retryable handler error", RetryConfig{}, Error{Stage: StageHandle, Err: NonRetryable(transient), Attempt: 1}, FailureActionDrop},
+		{"message.ErrPermanent handler error", RetryConfig{}, Error{Stage: StageHandle, Err: fmt.Errorf("%w: email is required", message.ErrPermanent), Attempt: 1}, FailureActionDrop},
 		{"decode failure", RetryConfig{}, Error{Stage: StageDecode, Err: ErrNoKind, Attempt: 1}, FailureActionDrop},
 		{"unhandled kind", RetryConfig{}, Error{Stage: StageUnhandled, Err: message.ErrUnhandledKind, Attempt: 1}, FailureActionDrop},
 		{"exhausted with stop", RetryConfig{MaxAttempts: 2, OnExhausted: FailureActionStop}, Error{Stage: StageHandle, Err: transient, Attempt: 2}, FailureActionStop},
@@ -36,6 +37,30 @@ func TestRetryPolicyDecisionTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := RetryPolicy(tt.cfg).Decide(context.Background(), tt.failure); got != tt.want {
+				t.Fatalf("Decide = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Intent: the share consumer's default policy classifies like RetryPolicy: a
+// handler error marked permanent, by either marker, is rejected rather than
+// released for redelivery.
+func TestReleaseOrRejectPolicyRejectsPermanentFailures(t *testing.T) {
+	transient := errors.New("database unavailable")
+	tests := []struct {
+		name string
+		err  error
+		want ShareAction
+	}{
+		{"transient", transient, ShareActionRelease},
+		{"NonRetryable", NonRetryable(transient), ShareActionReject},
+		{"message.ErrPermanent", fmt.Errorf("%w: email is required", message.ErrPermanent), ShareActionReject},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReleaseOrRejectPolicy().Decide(context.Background(), Error{Stage: StageHandle, Err: tt.err, Attempt: 1})
+			if got != tt.want {
 				t.Fatalf("Decide = %v, want %v", got, tt.want)
 			}
 		})
@@ -70,15 +95,16 @@ func TestDefaultRetryBackoff(t *testing.T) {
 	}
 }
 
-// Intent: NonRetryable marks an error without hiding it.
+// Intent: NonRetryable marks an error, for this package and provider-neutral
+// policies alike, without hiding it.
 func TestNonRetryable(t *testing.T) {
 	if NonRetryable(nil) != nil {
 		t.Fatal("NonRetryable(nil) != nil")
 	}
 	cause := errors.New("order does not exist")
 	err := NonRetryable(cause)
-	if !errors.Is(err, ErrNonRetryable) || !errors.Is(err, cause) {
-		t.Fatalf("%v does not match ErrNonRetryable and its cause", err)
+	if !errors.Is(err, ErrNonRetryable) || !errors.Is(err, message.ErrPermanent) || !errors.Is(err, cause) {
+		t.Fatalf("%v does not match ErrNonRetryable, message.ErrPermanent, and its cause", err)
 	}
 	if err.Error() != cause.Error() {
 		t.Fatalf("Error() = %q, want %q", err.Error(), cause.Error())

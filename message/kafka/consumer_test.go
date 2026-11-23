@@ -354,6 +354,32 @@ func TestConsumerNonRetryableErrorIsNotRetried(t *testing.T) {
 	}
 }
 
+// Intent: a provider-free handler marks a permanent failure by wrapping
+// message.ErrPermanent; under RetryPolicy it is not retried and is committed,
+// as with NonRetryable.
+func TestConsumerMessagePermanentErrorIsNotRetried(t *testing.T) {
+	h := newHarness(t, RetryPolicy(RetryConfig{}))
+	h.queue(fetchOf(testRecord(t, h.consumer.cfg, 0, 0)))
+	h.subscribe(func(context.Context, message.Message) error {
+		return fmt.Errorf("%w: email is required", message.ErrPermanent)
+	})
+
+	if err := h.run(); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	if len(h.client.setOffsets) != 0 || len(h.resumes.delays()) != 0 {
+		t.Fatalf("rewinds = %v, backoffs = %v, want none", h.client.setOffsets, h.resumes.delays())
+	}
+	if want := [][]string{{"0@0"}}; !reflect.DeepEqual(h.client.committedOffsets(), want) {
+		t.Fatalf("commits = %v, want %v", h.client.committedOffsets(), want)
+	}
+	failures := h.observed.stage(StageHandle)
+	if len(failures) != 1 || !failures[0].Final || !errors.Is(failures[0].Err, message.ErrPermanent) {
+		t.Fatalf("failures = %+v, want one final failure wrapping message.ErrPermanent", failures)
+	}
+}
+
 // Intent: decode and unhandled failures are classified by stage and, under
 // the default RetryPolicy, settled at once rather than retried.
 func TestConsumerDecodeAndUnhandledFailuresAreNotRetried(t *testing.T) {

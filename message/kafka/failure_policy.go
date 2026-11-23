@@ -3,6 +3,8 @@ package kafka
 import (
 	"context"
 	"errors"
+
+	"github.com/go-jimu/components/ddd/message"
 )
 
 // FailureAction is a FailurePolicy decision for one failed record.
@@ -53,7 +55,9 @@ type RetryConfig struct {
 	// 0 or less means 3.
 	MaxAttempts int
 	// Retryable reports whether a failure may be retried. nil means
-	// DefaultRetryable.
+	// DefaultRetryable. A custom Retryable should turn down an error matching
+	// message.ErrPermanent, as handlers rely on; calling DefaultRetryable
+	// first keeps that.
 	Retryable func(Error) bool
 	// OnExhausted is the action for a failure that is not retryable or has
 	// used MaxAttempts: FailureActionDrop (the zero value) or
@@ -63,10 +67,13 @@ type RetryConfig struct {
 
 // DefaultRetryable accepts StageHandle failures, a handler timeout
 // (ErrHandlerTimeout) and a recovered panic (ErrHandlerPanic) included, unless
-// the error matches ErrNonRetryable. It turns down decode and unhandled
-// failures, which the same bytes and handlers repeat.
+// the error matches ErrNonRetryable or the provider-neutral
+// message.ErrPermanent. It turns down decode and unhandled failures, which
+// the same bytes and handlers repeat.
 func DefaultRetryable(failure Error) bool {
-	return failure.Stage == StageHandle && !errors.Is(failure.Err, ErrNonRetryable)
+	return failure.Stage == StageHandle &&
+		!errors.Is(failure.Err, ErrNonRetryable) &&
+		!errors.Is(failure.Err, message.ErrPermanent)
 }
 
 // RetryPolicy retries Retryable failures in place until the record has had
