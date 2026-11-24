@@ -83,6 +83,12 @@
 // ErrDuplicateTask as "this work is already scheduled or has failed", and
 // resolve archived failures with asynq tooling.
 //
+// When an ID names work that must run again whenever it is enqueued, such as
+// a reconciliation keyed by its entity, build the Client with
+// WithArchivedReplacement. Enqueue then deletes an archived task holding the
+// ID and enqueues the new one, and ErrDuplicateTask means only "this work is
+// already scheduled or running".
+//
 // WithUnique(ttl) compares task type, payload, and queue. asynq holds the
 // uniqueness lock until the TTL expires or the task completes successfully.
 // Enqueue reports a suppressed duplicate as an error matching
